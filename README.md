@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Native React Native checkout SDK for [Wajub](https://wajub.com). Presents mobile-money and card payments in-app — **no WebView**. Calls `https://api.wajub.com/pay/*` with a session `authorization_token` from your [server SDK](../../README.md).
+Native React Native checkout SDK for [Wajub](https://wajub.com). Presents mobile-money and card payments in-app — **no WebView**. Calls `https://api.wajub.com/pay/*` with a session `authorization_token` from your [server SDK](https://docs.wajub.com/libraries/sdks).
 
 ## Architecture
 
@@ -19,8 +19,6 @@ POST /pay/process → handlePaymentAction (redirect/3DS via system browser)
         ↓
 watchStatus() → Pusher or polling until terminal
 ```
-
-Shared contract: [`mobile/spec/types.ts`](../spec/types.ts) and [`checkout.wajub/PAYMENT_SESSION_API.md`](../../../checkout.wajub/PAYMENT_SESSION_API.md).
 
 ## Requirements
 
@@ -90,7 +88,7 @@ const stop = session.watchStatus((update) => console.log(update));
 ## Documentation & support
 
 - Mobile SDK docs: [docs.wajub.com/libraries/sdks/mobile](https://docs.wajub.com/libraries/sdks/mobile)
-- Server SDKs (create payments): [packages/README.md](../../README.md)
+- Server SDKs (create payments): [docs.wajub.com/libraries/sdks](https://docs.wajub.com/libraries/sdks)
 
 ## License
 
