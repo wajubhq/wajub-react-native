@@ -12,7 +12,28 @@ import {
 import { handlePaymentAction } from './actionHandler';
 import { StripeCardSection } from './components/StripeCardSection';
 import { createSession, WajubSession } from './WajubSession';
-import type { MobileMoneyInput, PaymentResult, PresentOptions, SdkConfig, SessionChannel, SessionData } from './types';
+import { hostedCardFieldError, isHostedCardField } from './mappers/paymentMapper';
+import type {
+  HostedCardField,
+  MobileMoneyInput,
+  PaymentResult,
+  PresentOptions,
+  SdkConfig,
+  SessionChannel,
+  SessionData,
+} from './types';
+
+const HOSTED_CARD_FIELD_LABELS: Record<HostedCardField, string> = {
+  first_name: 'First name',
+  last_name: 'Last name',
+  email: 'Email',
+  phone: 'Phone number',
+  address: 'Address',
+  city: 'City',
+  country: 'Country (2-letter code, e.g. CI)',
+  state: 'State / region',
+  zip_code: 'Postal code',
+};
 
 type PaymentTab = 'mobile_money' | 'card';
 
@@ -106,6 +127,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
   const [country, setCountry] = useState('CM');
   const [cardholderName, setCardholderName] = useState('');
   const [email, setEmail] = useState('');
+  const [billing, setBilling] = useState<Partial<Record<HostedCardField, string>>>({});
 
   const hasCard = sessionData?.channels.some((c) => c.type.toLowerCase() === 'card') ?? false;
   const cardSlug = session.cardChannelSlug() ?? 'card';
@@ -114,8 +136,12 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
   // Paystack / Flutterwave: the PSP's own hosted checkout collects the card
   // and runs PIN/OTP/AVS (see WajubSession.payCardHosted()).
   const clientSessionAvailable = cardCfg?.client_session === true;
-  // PayPal / Mollie / Paddle: the PSP's own page collects the card.
+  // PayPal / Mollie / Paddle / Kkiapay / FedaPay / PayDunya / CinetPay: the
+  // PSP's own page collects the card; some still need contact/billing
+  // details the merchant didn't attach (sdk-config `required_fields`).
   const hostedRedirectAvailable = cardCfg?.sdk === 'hosted_redirect';
+  const redirectFields = (cardCfg?.required_fields ?? []).filter(isHostedCardField);
+  const redirectFieldsValid = redirectFields.every((f) => hostedCardFieldError(f, billing[f]) === null);
 
   React.useEffect(() => {
     if (!visible) return;
@@ -189,7 +215,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
     setSubmitting(true);
     setError(null);
     try {
-      const result = await session.process(cardSlug, {});
+      const result = await session.payCardHostedRedirect(cardSlug, billing);
       onResult(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Card payment failed');
@@ -299,10 +325,22 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
             <>
               {error ? <Text style={styles.error}>{error}</Text> : null}
               <Text style={styles.hint}>You will complete the payment on the provider's secure page.</Text>
+              {redirectFields.map((field) => (
+                <TextInput
+                  key={field}
+                  style={styles.input}
+                  placeholder={HOSTED_CARD_FIELD_LABELS[field]}
+                  keyboardType={field === 'email' ? 'email-address' : field === 'phone' ? 'phone-pad' : 'default'}
+                  autoCapitalize={field === 'email' ? 'none' : field === 'country' ? 'characters' : 'words'}
+                  maxLength={field === 'country' ? 2 : undefined}
+                  value={billing[field] ?? ''}
+                  onChangeText={(value) => setBilling((b) => ({ ...b, [field]: value }))}
+                />
+              ))}
               <Pressable
-                style={[styles.button, submitting && styles.buttonDisabled]}
+                style={[styles.button, (submitting || !redirectFieldsValid) && styles.buttonDisabled]}
                 onPress={payCardRedirect}
-                disabled={submitting}
+                disabled={submitting || !redirectFieldsValid}
               >
                 <Text style={styles.buttonText}>{submitting ? 'Processing…' : 'Pay by card'}</Text>
               </Pressable>

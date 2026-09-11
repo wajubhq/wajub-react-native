@@ -19,6 +19,7 @@ declare module 'react-native' {
     placeholder?: string;
     keyboardType?: string;
     autoCapitalize?: string;
+    maxLength?: number;
     value?: string;
     onChangeText?: (text: string) => void;
   }>;

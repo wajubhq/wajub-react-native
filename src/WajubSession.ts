@@ -1,10 +1,22 @@
 import { PayClient } from './client/payClient';
-import { buildMobileMoneyRequest, mapProcessResponse, mapStatusToResult } from './mappers/paymentMapper';
+import {
+  buildHostedCardRequest,
+  buildMobileMoneyRequest,
+  mapProcessResponse,
+  mapStatusToResult,
+} from './mappers/paymentMapper';
 import { buildStripeCardRequest } from './adapters/stripeAdapter';
 import { openHostedRedirect, openHostedRedirectAndWait } from './adapters/hostedRedirect';
 import { subscribeStatus } from './realtime/statusSubscriber';
 import { WajubError } from './WajubError';
-import type { ClientSessionOptions, MobileMoneyInput, PaymentResult, SdkConfig, SessionData } from './types';
+import type {
+  ClientSessionOptions,
+  HostedCardField,
+  MobileMoneyInput,
+  PaymentResult,
+  SdkConfig,
+  SessionData,
+} from './types';
 
 /** Session-scoped checkout client — `/pay/*` without WebView. */
 export class WajubSession {
@@ -40,6 +52,20 @@ export class WajubSession {
     const data = buildStripeCardRequest(paymentMethodId, cardholderName);
     const raw = await this.client.process(this.token, channelSlug, data);
     return mapProcessResponse(raw, 'card');
+  }
+
+  /**
+   * Card on a `hosted_redirect` channel (PayPal, Mollie, Paddle, Kkiapay,
+   * FedaPay, PayDunya, CinetPay): returns `requires_action` / `redirect` to
+   * the PSP's own card page. `billing` must carry every field sdk-config
+   * lists in the channel's `required_fields`.
+   */
+  async payCardHostedRedirect(
+    channel: string,
+    billing: Partial<Record<HostedCardField, string>> = {},
+  ): Promise<PaymentResult> {
+    await this.loadSession();
+    return this.process(channel, buildHostedCardRequest(billing));
   }
 
   async process(channel: string, data: Record<string, unknown>): Promise<PaymentResult> {

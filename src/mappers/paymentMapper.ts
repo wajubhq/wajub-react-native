@@ -1,5 +1,5 @@
-import { UNSUPPORTED_ACTION_CODE } from '../types';
-import type { ClientSession, MobileMoneyInput, PaymentResult, SessionTransaction } from '../types';
+import { HOSTED_CARD_FIELDS, UNSUPPORTED_ACTION_CODE } from '../types';
+import type { ClientSession, HostedCardField, MobileMoneyInput, PaymentResult, SessionTransaction } from '../types';
 
 export interface RawProcessResponse {
   code: number;
@@ -20,6 +20,30 @@ export function buildMobileMoneyRequest(input: MobileMoneyInput): Record<string,
     phone: input.phone,
     country: input.country.toUpperCase(),
   };
+}
+
+export function isHostedCardField(field: string): field is HostedCardField {
+  return (HOSTED_CARD_FIELDS as readonly string[]).includes(field);
+}
+
+/** Why a hosted-redirect billing value can't be sent yet, or null when it's fine. */
+export function hostedCardFieldError(field: HostedCardField, value: string | undefined): string | null {
+  const v = (value ?? '').trim();
+  if (!v) return 'Required';
+  if (field === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return 'Invalid email';
+  // CinetPay's customer_country is a 2-letter ISO code.
+  if (field === 'country' && !/^[A-Za-z]{2}$/.test(v)) return 'Use the 2-letter country code';
+  return null;
+}
+
+/** `data` for a hosted-redirect card charge — flat keys, exactly as sdk-config names them. */
+export function buildHostedCardRequest(billing: Partial<Record<HostedCardField, string>>): Record<string, string> {
+  const data: Record<string, string> = {};
+  for (const field of HOSTED_CARD_FIELDS) {
+    const v = (billing[field] ?? '').trim();
+    if (v) data[field] = field === 'country' ? v.toUpperCase() : v;
+  }
+  return data;
 }
 
 export function mapProcessResponse(body: RawProcessResponse, methodType: string): PaymentResult {

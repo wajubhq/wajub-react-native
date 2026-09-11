@@ -62,6 +62,34 @@ export interface ClientSessionOptions {
 /** Error code for an API `action` this SDK can't perform natively — see mapProcessResponse(). */
 export const UNSUPPORTED_ACTION_CODE = 'unsupported_action';
 
+/**
+ * Contact/billing fields a `hosted_redirect` card PSP may still need before
+ * it opens its page — sdk-config lists the missing ones in `required_fields`
+ * (Kkiapay/FedaPay/PayDunya: `email`; CinetPay: `first_name` … `zip_code`).
+ */
+export type HostedCardField =
+  | 'first_name'
+  | 'last_name'
+  | 'email'
+  | 'phone'
+  | 'address'
+  | 'city'
+  | 'country'
+  | 'state'
+  | 'zip_code';
+
+export const HOSTED_CARD_FIELDS: readonly HostedCardField[] = [
+  'first_name',
+  'last_name',
+  'email',
+  'phone',
+  'address',
+  'city',
+  'country',
+  'state',
+  'zip_code',
+];
+
 export interface SdkConfig {
   channels: Record<string, SdkChannelConfig>;
 }
