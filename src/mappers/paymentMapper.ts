@@ -1,5 +1,13 @@
 import { HOSTED_CARD_FIELDS, UNSUPPORTED_ACTION_CODE } from '../types';
-import type { ClientSession, HostedCardField, MobileMoneyInput, PaymentResult, SessionTransaction } from '../types';
+import type {
+  ClientSession,
+  HostedCardField,
+  MobileMoneyInput,
+  PaymentResult,
+  SdkChannelConfig,
+  SessionChannel,
+  SessionTransaction,
+} from '../types';
 
 export interface RawProcessResponse {
   code: number;
@@ -20,6 +28,21 @@ export function buildMobileMoneyRequest(input: MobileMoneyInput): Record<string,
     phone: input.phone,
     country: input.country.toUpperCase(),
   };
+}
+
+/**
+ * A `wallet` channel the SDK can pay with a single tap — nothing to collect,
+ * `/pay/process` answers with a redirect to the wallet's own page/app (e.g.
+ * Djamo). Apple Pay / Google Pay / PayPal-via-Stripe need their own SDK
+ * flavor and are excluded by `sdk: "form"` + no `required_fields`.
+ */
+export function isRedirectWalletChannel(channel: SessionChannel, config: SdkChannelConfig | undefined): boolean {
+  return (
+    channel.type.toLowerCase() === 'wallet' &&
+    config?.available === true &&
+    config.sdk === 'form' &&
+    (config.required_fields ?? []).length === 0
+  );
 }
 
 export function isHostedCardField(field: string): field is HostedCardField {

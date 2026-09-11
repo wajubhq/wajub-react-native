@@ -73,6 +73,7 @@ if ('cancelled' in outcome) return;
 | Card (`stripe_elements`) | `@stripe/stripe-react-native` CardField |
 | Card via Paystack / Flutterwave / Adyen Pay by Link (`client_session`) | PSP-hosted checkout in the system browser — PIN / OTP / AVS / 3DS handled by the PSP |
 | Card via PayPal / Mollie / Paddle / Kkiapay / FedaPay / PayDunya / CinetPay (`hosted_redirect`) | PSP's own page in the system browser; the sheet first asks for the sdk-config `required_fields` (e.g. email, CinetPay billing) — headless: `session.payCardHostedRedirect(channel, billing)` |
+| One-tap wallets, e.g. Djamo (`wallet` channel, `form`, no `required_fields`) | "Wallet" tab — headless: `session.payWallet(channel)`, then open the redirect |
 | Redirect / 3DS | `Linking.openURL` (system browser) |
 | Realtime | `pusher-js` + polling fallback |
 

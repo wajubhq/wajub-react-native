@@ -12,7 +12,7 @@ import {
 import { handlePaymentAction } from './actionHandler';
 import { StripeCardSection } from './components/StripeCardSection';
 import { createSession, WajubSession } from './WajubSession';
-import { hostedCardFieldError, isHostedCardField } from './mappers/paymentMapper';
+import { hostedCardFieldError, isHostedCardField, isRedirectWalletChannel } from './mappers/paymentMapper';
 import type {
   HostedCardField,
   MobileMoneyInput,
@@ -35,7 +35,9 @@ const HOSTED_CARD_FIELD_LABELS: Record<HostedCardField, string> = {
   zip_code: 'Postal code',
 };
 
-type PaymentTab = 'mobile_money' | 'card';
+type PaymentTab = 'mobile_money' | 'card' | 'wallet';
+
+const TAB_LABELS: Record<PaymentTab, string> = { mobile_money: 'Mobile Money', card: 'Card', wallet: 'Wallet' };
 
 interface WajubContextValue {
   createSession: (token: string) => WajubSession;
@@ -122,6 +124,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
   const [sdkConfig, setSdkConfig] = useState<SdkConfig | null>(null);
   const [tab, setTab] = useState<PaymentTab>('mobile_money');
   const [momoChannels, setMomoChannels] = useState<SessionChannel[]>([]);
+  const [walletChannels, setWalletChannels] = useState<SessionChannel[]>([]);
   const [selected, setSelected] = useState<SessionChannel | null>(null);
   const [phone, setPhone] = useState('');
   const [country, setCountry] = useState('CM');
@@ -130,6 +133,11 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
   const [billing, setBilling] = useState<Partial<Record<HostedCardField, string>>>({});
 
   const hasCard = sessionData?.channels.some((c) => c.type.toLowerCase() === 'card') ?? false;
+  const availableTabs: PaymentTab[] = [
+    ...(momoChannels.length > 0 ? (['mobile_money'] as const) : []),
+    ...(hasCard ? (['card'] as const) : []),
+    ...(walletChannels.length > 0 ? (['wallet'] as const) : []),
+  ];
   const cardSlug = session.cardChannelSlug() ?? 'card';
   const cardCfg = sdkConfig?.channels[cardSlug];
   const stripeAvailable = cardCfg?.sdk === 'stripe_elements' && !!cardCfg.publishable_key;
@@ -155,12 +163,14 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
           (c) => c.type.toLowerCase() === 'mobile_money' || c.type.toLowerCase() === 'mobile',
         );
         const card = data.channels.some((c) => c.type.toLowerCase() === 'card');
+        const wallets = data.channels.filter((c) => isRedirectWalletChannel(c, cfg.channels[c.slug]));
         setSessionData(data);
         setSdkConfig(cfg);
         setMomoChannels(momo);
+        setWalletChannels(wallets);
         setSelected(momo[0] ?? null);
         setCountry(momo[0]?.countries[0] ?? 'CM');
-        setTab(momo.length === 0 && card ? 'card' : 'mobile_money');
+        setTab(momo.length > 0 ? 'mobile_money' : card ? 'card' : wallets.length > 0 ? 'wallet' : 'mobile_money');
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load session');
       } finally {
@@ -195,6 +205,18 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
       onResult(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Card payment failed');
+      setSubmitting(false);
+    }
+  };
+
+  const payWallet = async (channel: SessionChannel) => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await session.payWallet(channel.slug);
+      onResult(result);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Payment failed');
       setSubmitting(false);
     }
   };
@@ -234,25 +256,33 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
             </Pressable>
           </View>
 
-          {momoChannels.length > 0 && hasCard ? (
+          {availableTabs.length > 1 ? (
             <View style={styles.tabs}>
-              <Pressable
-                style={[styles.tab, tab === 'mobile_money' && styles.tabActive]}
-                onPress={() => setTab('mobile_money')}
-              >
-                <Text style={tab === 'mobile_money' ? styles.tabTextActive : styles.tabText}>Mobile Money</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.tab, tab === 'card' && styles.tabActive]}
-                onPress={() => setTab('card')}
-              >
-                <Text style={tab === 'card' ? styles.tabTextActive : styles.tabText}>Card</Text>
-              </Pressable>
+              {availableTabs.map((t) => (
+                <Pressable key={t} style={[styles.tab, tab === t && styles.tabActive]} onPress={() => setTab(t)}>
+                  <Text style={tab === t ? styles.tabTextActive : styles.tabText}>{TAB_LABELS[t]}</Text>
+                </Pressable>
+              ))}
             </View>
           ) : null}
 
           {loading ? (
             <ActivityIndicator style={styles.loader} />
+          ) : tab === 'wallet' ? (
+            <>
+              {error ? <Text style={styles.error}>{error}</Text> : null}
+              <Text style={styles.hint}>You will approve the payment in the wallet app.</Text>
+              {walletChannels.map((ch) => (
+                <Pressable
+                  key={ch.slug}
+                  style={[styles.button, submitting && styles.buttonDisabled]}
+                  onPress={() => payWallet(ch)}
+                  disabled={submitting}
+                >
+                  <Text style={styles.buttonText}>{submitting ? 'Processing…' : `Pay with ${ch.name}`}</Text>
+                </Pressable>
+              ))}
+            </>
           ) : tab === 'mobile_money' ? (
             momoChannels.length === 0 ? (
               <Text>No Mobile Money channels available.</Text>

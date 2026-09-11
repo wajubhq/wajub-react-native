@@ -8,6 +8,7 @@ export {
   buildMobileMoneyRequest,
   hostedCardFieldError,
   isHostedCardField,
+  isRedirectWalletChannel,
   mapProcessResponse,
   mapStatusToResult,
 } from './mappers/paymentMapper';

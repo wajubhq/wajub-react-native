@@ -1,6 +1,6 @@
 {
   "name": "@wajub/react-native",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Native Wajub checkout SDK for React Native — Mobile Money, Stripe, PSP-hosted cards, no WebView.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

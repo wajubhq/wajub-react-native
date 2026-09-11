@@ -68,6 +68,16 @@ export class WajubSession {
     return this.process(channel, buildHostedCardRequest(billing));
   }
 
+  /**
+   * One-tap wallet channel (sdk-config `form`, no `required_fields`, channel
+   * type `wallet` — e.g. Djamo): returns `requires_action` / `redirect` to the
+   * wallet's payment page, which opens the wallet app on the device.
+   */
+  async payWallet(channel: string): Promise<PaymentResult> {
+    await this.loadSession();
+    return this.process(channel, {});
+  }
+
   async process(channel: string, data: Record<string, unknown>): Promise<PaymentResult> {
     const raw = await this.client.process(this.token, channel, data);
     return mapProcessResponse(raw, this.methodType(channel));
@@ -159,6 +169,7 @@ export class WajubSession {
     const type = match?.type.toLowerCase();
     if (type === 'mobile_money' || type === 'mobile') return 'mobile_money';
     if (type === 'card') return 'card';
+    if (type === 'wallet') return 'wallet';
     return 'unknown';
   }
 }
