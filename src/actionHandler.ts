@@ -13,7 +13,12 @@ export async function handlePaymentAction(
     return result;
   }
 
-  if (result.action === 'redirect' || result.action === 'confirm_3ds' || result.action === 'confirm') {
+  if (
+    result.action === 'redirect' ||
+    result.action === 'confirm_3ds' ||
+    result.action === 'confirm' ||
+    result.action === 'client_session'
+  ) {
     const url = result.action_url;
     if (url) {
       await session.handleRedirectAction(result);

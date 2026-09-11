@@ -1,20 +1,66 @@
 /** Fixed Wajub API origin — not configurable. */
 export const API_URL = 'https://api.wajub.com';
 
+/**
+ * `paystack_inline` / `flutterwave_inline` are legacy values the API no
+ * longer sends — Paystack/Flutterwave cards go through `client_session`.
+ * `adyen_custom_card` needs Adyen's own client-side encryption, which this
+ * SDK doesn't embed: treated as unavailable.
+ */
 export type SdkFlavor =
   | 'form'
   | 'stripe_elements'
+  | 'hosted_redirect'
+  | 'adyen_custom_card'
   | 'paystack_inline'
-  | 'flutterwave_inline'
-  | 'hosted_redirect';
+  | 'flutterwave_inline';
 
 export interface SdkChannelConfig {
   available: boolean;
+  /** Prediction only — the pinned provider is `ClientSession.provider`. */
   provider: string | null;
   sdk: SdkFlavor | null;
   publishable_key: string | null;
   required_fields: string[];
+  /** true → `startClientSession()` can hand this channel to the PSP's own
+   *  hosted checkout (PIN/OTP/AVS handled by the PSP). */
+  client_session?: boolean;
 }
+
+/**
+ * PSP-hosted checkout session (POST /pay/client-session). Default flow:
+ * open `hosted_url` in the system browser, then `completeClientSession(id)`
+ * when the payer returns. Apps may instead launch the PSP's native SDK
+ * themselves — Paystack Android/Flutter (`public_key` + `access_code`),
+ * Flutterwave Android (`public_key` + `encryption_key`, `reference` as
+ * tx_ref) — and call `completeClientSession(id)` the same way.
+ */
+export interface ClientSession {
+  id: string;
+  provider: string;
+  /** PSP-side reference (Paystack `reference`, Flutterwave `tx_ref`). */
+  reference?: string;
+  /** In the PSP's own units (Paystack: subunit; Flutterwave: major). */
+  amount?: number;
+  currency?: string;
+  hosted_url?: string;
+  access_code?: string;
+  public_key?: string;
+  encryption_key?: string;
+}
+
+export interface ClientSessionOptions {
+  /** Required by Paystack/Flutterwave when the transaction has no customer email. */
+  email?: string | null;
+  name?: string | null;
+  /** http(s) URL the PSP's hosted page redirects to after payment (e.g. a universal/app link). */
+  return_url?: string | null;
+  /** Replace a session that died on the PSP side (the old one is re-verified first). */
+  restart?: boolean;
+}
+
+/** Error code for an API `action` this SDK can't perform natively — see mapProcessResponse(). */
+export const UNSUPPORTED_ACTION_CODE = 'unsupported_action';
 
 export interface SdkConfig {
   channels: Record<string, SdkChannelConfig>;
@@ -90,7 +136,7 @@ export interface WajubErrorShape {
   details?: Record<string, string>;
 }
 
-export type ActionKind = 'redirect' | 'confirm' | 'confirm_3ds' | 'push_approval';
+export type ActionKind = 'redirect' | 'confirm' | 'confirm_3ds' | 'push_approval' | 'client_session';
 
 export type PaymentResult =
   | { status: 'complete'; transaction: SessionTransaction }
@@ -99,6 +145,8 @@ export type PaymentResult =
       status: 'requires_action';
       action: ActionKind;
       action_url?: string | null;
+      /** Set when `action` is `client_session`; `action_url` is then its `hosted_url`. */
+      client_session?: ClientSession | null;
       transaction: SessionTransaction;
     }
   | { status: 'failed'; error: WajubErrorShape; transaction: SessionTransaction | null };

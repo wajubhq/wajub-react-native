@@ -105,11 +105,17 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
   const [phone, setPhone] = useState('');
   const [country, setCountry] = useState('CM');
   const [cardholderName, setCardholderName] = useState('');
+  const [email, setEmail] = useState('');
 
   const hasCard = sessionData?.channels.some((c) => c.type.toLowerCase() === 'card') ?? false;
   const cardSlug = session.cardChannelSlug() ?? 'card';
   const cardCfg = sdkConfig?.channels[cardSlug];
   const stripeAvailable = cardCfg?.sdk === 'stripe_elements' && !!cardCfg.publishable_key;
+  // Paystack / Flutterwave: the PSP's own hosted checkout collects the card
+  // and runs PIN/OTP/AVS (see WajubSession.payCardHosted()).
+  const clientSessionAvailable = cardCfg?.client_session === true;
+  // PayPal / Mollie / Paddle: the PSP's own page collects the card.
+  const hostedRedirectAvailable = cardCfg?.sdk === 'hosted_redirect';
 
   React.useEffect(() => {
     if (!visible) return;
@@ -160,6 +166,30 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
     setError(null);
     try {
       const result = await session.payCard(cardSlug, paymentMethodId, cardholderName.trim() || null);
+      onResult(result);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Card payment failed');
+      setSubmitting(false);
+    }
+  };
+
+  const payCardHosted = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await session.payCardHosted(cardSlug, { email: email.trim() || null });
+      onResult(result);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Card payment failed');
+      setSubmitting(false);
+    }
+  };
+
+  const payCardRedirect = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await session.process(cardSlug, {});
       onResult(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Card payment failed');
@@ -237,9 +267,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
             )
           ) : !hasCard ? (
             <Text>No card channel available.</Text>
-          ) : !stripeAvailable ? (
-            <Text>Card payments unavailable for this session.</Text>
-          ) : (
+          ) : stripeAvailable ? (
             <StripeCardSection
               cardholderName={cardholderName}
               onCardholderNameChange={setCardholderName}
@@ -247,6 +275,40 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
               submitting={submitting}
               error={error}
             />
+          ) : clientSessionAvailable ? (
+            <>
+              {error ? <Text style={styles.error}>{error}</Text> : null}
+              <Text style={styles.hint}>You will complete the payment on the provider's secure page.</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Email (for your receipt)"
+                keyboardType="email-address"
+                autoCapitalize="none"
+                value={email}
+                onChangeText={setEmail}
+              />
+              <Pressable
+                style={[styles.button, submitting && styles.buttonDisabled]}
+                onPress={payCardHosted}
+                disabled={submitting}
+              >
+                <Text style={styles.buttonText}>{submitting ? 'Waiting for payment…' : 'Pay by card'}</Text>
+              </Pressable>
+            </>
+          ) : hostedRedirectAvailable ? (
+            <>
+              {error ? <Text style={styles.error}>{error}</Text> : null}
+              <Text style={styles.hint}>You will complete the payment on the provider's secure page.</Text>
+              <Pressable
+                style={[styles.button, submitting && styles.buttonDisabled]}
+                onPress={payCardRedirect}
+                disabled={submitting}
+              >
+                <Text style={styles.buttonText}>{submitting ? 'Processing…' : 'Pay by card'}</Text>
+              </Pressable>
+            </>
+          ) : (
+            <Text>Card payments unavailable for this session.</Text>
           )}
         </View>
       </View>
@@ -310,6 +372,10 @@ const styles = StyleSheet.create({
   },
   error: {
     color: '#c62828',
+    marginBottom: 12,
+  },
+  hint: {
+    color: '#555',
     marginBottom: 12,
   },
   chips: {

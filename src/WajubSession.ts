@@ -1,9 +1,10 @@
 import { PayClient } from './client/payClient';
 import { buildMobileMoneyRequest, mapProcessResponse, mapStatusToResult } from './mappers/paymentMapper';
 import { buildStripeCardRequest } from './adapters/stripeAdapter';
-import { openHostedRedirect } from './adapters/hostedRedirect';
+import { openHostedRedirect, openHostedRedirectAndWait } from './adapters/hostedRedirect';
 import { subscribeStatus } from './realtime/statusSubscriber';
-import type { MobileMoneyInput, PaymentResult, SdkConfig, SessionData } from './types';
+import { WajubError } from './WajubError';
+import type { ClientSessionOptions, MobileMoneyInput, PaymentResult, SdkConfig, SessionData } from './types';
 
 /** Session-scoped checkout client — `/pay/*` without WebView. */
 export class WajubSession {
@@ -46,11 +47,63 @@ export class WajubSession {
     return mapProcessResponse(raw, this.methodType(channel));
   }
 
+  /**
+   * Opens (or re-serves) a PSP-hosted checkout for a card channel whose
+   * sdk-config has `client_session: true` (Paystack, Flutterwave). Returns
+   * `requires_action` / `client_session` — open `client_session.hosted_url`
+   * (or launch the PSP's native SDK with it), then call
+   * `completeClientSession()`. See `payCardHosted()` for the one-call flow.
+   */
+  async startClientSession(channel: string, options: ClientSessionOptions = {}): Promise<PaymentResult> {
+    await this.loadSession();
+    const raw = await this.client.startClientSession(this.token, channel, options);
+    return mapProcessResponse(raw, this.methodType(channel));
+  }
+
+  /**
+   * Verifies a client session once the payer is back. `complete` = paid;
+   * `processing` = not confirmed yet (keep `watchStatus()` running — the PSP
+   * webhook settles it). Throws WajubError (402) on a definitive failure.
+   */
+  async completeClientSession(clientSessionId: string, channel = 'card'): Promise<PaymentResult> {
+    const raw = await this.client.completeClientSession(this.token, clientSessionId);
+    return mapProcessResponse(raw, this.methodType(channel));
+  }
+
+  /**
+   * One-call hosted card payment: start the client session, open the PSP's
+   * page in the system browser, wait for the payer to come back, complete.
+   */
+  async payCardHosted(channel: string, options: ClientSessionOptions = {}): Promise<PaymentResult> {
+    const started = await this.startClientSession(channel, options);
+    if (started.status !== 'requires_action' || started.action !== 'client_session' || !started.client_session) {
+      return started;
+    }
+
+    const url = started.client_session.hosted_url;
+    if (!url || !(await openHostedRedirectAndWait(url))) {
+      return started;
+    }
+
+    try {
+      return await this.completeClientSession(started.client_session.id, channel);
+    } catch (e) {
+      // The payer already went through the PSP's page: only a 402 is a
+      // verified decline. Anything else (network, expired session) may still
+      // be settled by the PSP webhook — report processing so the app keeps
+      // watching the status instead of offering a fresh attempt.
+      if (e instanceof WajubError && e.decline_code) {
+        return { status: 'failed', error: e, transaction: started.transaction };
+      }
+      return { status: 'processing', transaction: started.transaction };
+    }
+  }
+
   async handleRedirectAction(result: PaymentResult): Promise<boolean> {
     if (result.status !== 'requires_action') {
       return false;
     }
-    if (!['redirect', 'confirm', 'confirm_3ds'].includes(result.action)) {
+    if (!['redirect', 'confirm', 'confirm_3ds', 'client_session'].includes(result.action)) {
       return false;
     }
     const url = result.action_url;

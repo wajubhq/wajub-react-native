@@ -18,6 +18,7 @@ declare module 'react-native' {
     style?: unknown;
     placeholder?: string;
     keyboardType?: string;
+    autoCapitalize?: string;
     value?: string;
     onChangeText?: (text: string) => void;
   }>;
@@ -35,6 +36,13 @@ declare module 'react-native' {
     children?: ReactNode;
   }>;
   export const ActivityIndicator: ComponentType<{ style?: unknown }>;
+  export type AppStateStatus = 'active' | 'background' | 'inactive' | 'unknown' | 'extension';
+  export const AppState: {
+    addEventListener(
+      type: 'change',
+      listener: (state: AppStateStatus) => void,
+    ): { remove(): void };
+  };
   export const Linking: {
     canOpenURL(url: string): Promise<boolean>;
     openURL(url: string): Promise<void>;

@@ -1,5 +1,5 @@
 import { API_URL } from '../types';
-import type { CancelResult, SdkConfig, SessionData } from '../types';
+import type { CancelResult, ClientSessionOptions, SdkConfig, SessionData } from '../types';
 import { WajubError } from '../WajubError';
 import type { RawProcessResponse } from '../mappers/paymentMapper';
 
@@ -72,6 +72,29 @@ export class PayClient {
       channel,
       data,
     }, { 'Idempotency-Key': idempotencyKey() });
+  }
+
+  /**
+   * POST /pay/client-session — opens (or re-serves) a PSP-hosted checkout
+   * for `channel`. Idempotent server-side; pins the provider.
+   */
+  async startClientSession(token: string, channel: string, options: ClientSessionOptions = {}): Promise<RawProcessResponse> {
+    const body: Record<string, unknown> = { channel };
+    if (options.email) body.email = options.email;
+    if (options.name) body.name = options.name;
+    if (options.return_url) body.return_url = options.return_url;
+    if (options.restart) body.restart = true;
+    return this.request<RawProcessResponse>('POST', token, '/pay/client-session', body);
+  }
+
+  /**
+   * POST /pay/client-session/complete — the backend verifies with the PSP by
+   * its own reference; the client never sends a PSP reference.
+   */
+  async completeClientSession(token: string, clientSessionId: string): Promise<RawProcessResponse> {
+    return this.request<RawProcessResponse>('POST', token, '/pay/client-session/complete', {
+      client_session_id: clientSessionId,
+    });
   }
 
   async cancel(token: string): Promise<CancelResult> {

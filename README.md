@@ -71,6 +71,8 @@ if ('cancelled' in outcome) return;
 |--------|---------|
 | Mobile Money (`form`) | Native modal |
 | Card (`stripe_elements`) | `@stripe/stripe-react-native` CardField |
+| Card via Paystack / Flutterwave (`client_session`) | PSP-hosted checkout in the system browser — PIN / OTP / AVS handled by the PSP |
+| Card via PayPal / Mollie / Paddle (`hosted_redirect`) | PSP's own page in the system browser |
 | Redirect / 3DS | `Linking.openURL` (system browser) |
 | Realtime | `pusher-js` + polling fallback |
 
@@ -84,6 +86,32 @@ const result = await session.payCard('card', 'pm_...');
 await handlePaymentAction(session, result);
 const stop = session.watchStatus((update) => console.log(update));
 ```
+
+## Card via Paystack / Flutterwave (client sessions)
+
+When `sdk-config` reports `client_session: true` for the card channel, the
+PSP's own hosted checkout collects the card and runs PIN / OTP / address
+checks — this SDK never touches card data. `PaymentSheet` does it for you;
+headless:
+
+```ts
+const result = await session.payCardHosted('card', { email: 'payer@example.com' });
+// 'complete' → paid · 'processing' → not confirmed yet, keep watchStatus() running
+```
+
+`payCardHosted()` = `startClientSession()` → open `client_session.hosted_url`
+in the system browser → wait for the app to return to the foreground →
+`completeClientSession(id)`. The backend verifies the payment with the PSP by
+its own reference and checks amount and currency.
+
+To use a PSP's native SDK instead, start the session yourself and launch it
+with the returned `client_session` (Paystack: `public_key` + `access_code`;
+Flutterwave: `public_key` + `encryption_key`, `reference` as `tx_ref`), then
+call `session.completeClientSession(client_session.id)` when it returns.
+
+An API `action` this SDK can't perform natively (e.g. `confirm_otp`) comes
+back as `failed` with `error.code === 'unsupported_action'` — never as an
+endless `processing`.
 
 ## Documentation & support
 
