@@ -20,6 +20,7 @@
   },
   "peerDependencies": {
     "@stripe/stripe-react-native": ">=0.38.0",
+    "@react-native-community/netinfo": ">=11.0.0",
     "react": ">=18",
     "react-native": ">=0.74"
   },

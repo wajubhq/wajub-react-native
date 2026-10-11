@@ -25,14 +25,17 @@ watchStatus() → Pusher and polling until terminal
 | Requirement | Version |
 |-------------|---------|
 | `react-native` | `>=0.74` |
-| `@stripe/stripe-react-native` | `>=0.38.0` (for `stripe_elements` card flavor) |
+| `@react-native-community/netinfo` | `>=11.0.0` (the realtime client needs it) |
+| `@stripe/stripe-react-native` | `>=0.38.0`, optional: only for the `stripe_elements` card flavor |
 
 `@stripe/stripe-react-native` sets its own minimum iOS/Android platform versions — see [their requirements](https://github.com/stripe/stripe-react-native).
 
 ## Installation
 
 ```bash
-npm install @wajub/react-native @stripe/stripe-react-native pusher-js
+npm install @wajub/react-native @react-native-community/netinfo
+# Cards through Stripe only:
+npm install @stripe/stripe-react-native
 cd ios && pod install
 ```
 

@@ -40,20 +40,27 @@ export class WajubError extends Error implements WajubErrorShape {
     correlationId?: string | null,
     retryAfterSeconds?: number | null,
   ): WajubError {
+    // 410 is an ended session: no retry of the same token can succeed. A 5xx
+    // is Wajub's side, not the payer's payment.
     const type: WajubErrorType =
-      status === 401 || status === 404
+      status === 401 || status === 404 || status === 410
         ? 'authentication_error'
         : status === 422
           ? 'invalid_request_error'
           : status === 429
             ? 'rate_limit_error'
-            : 'payment_error';
+            : status >= 500
+              ? 'api_error'
+              : 'payment_error';
+    const keys = Object.keys(details ?? {});
 
     return new WajubError({
       type,
       code,
       message,
-      retryable: status !== 403,
+      retryable: status !== 403 && status !== 410,
+      // The field the refusal is about, when it names exactly one.
+      param: keys.length === 1 ? keys[0] : null,
       correlation_id: correlationId ?? null,
       retry_after_seconds: retryAfterSeconds ?? null,
       details,

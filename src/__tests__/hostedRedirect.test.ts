@@ -63,3 +63,29 @@ describe('WajubSession.payCardHostedRedirect', () => {
     expect(result.status).toBe('requires_action');
   });
 });
+
+describe('openHostedRedirect', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { Linking } = require('react-native');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { openHostedRedirect } = require('../adapters/hostedRedirect');
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('opens an https page without asking canOpenURL, which Android 11+ answers false without <queries>', async () => {
+    const canOpen = jest.spyOn(Linking, 'canOpenURL').mockResolvedValue(false);
+    const open = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+
+    await expect(openHostedRedirect('https://checkout.example.test/pay/abc')).resolves.toBe(true);
+    expect(canOpen).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalledWith('https://checkout.example.test/pay/abc');
+  });
+
+  it('still checks another scheme before opening it', async () => {
+    jest.spyOn(Linking, 'canOpenURL').mockResolvedValue(false);
+    const open = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+
+    await expect(openHostedRedirect('upi://pay?pa=x')).resolves.toBe(false);
+    expect(open).not.toHaveBeenCalled();
+  });
+});

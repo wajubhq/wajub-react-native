@@ -1,7 +1,35 @@
 import React, { useState } from 'react';
 import { View, Text, TextInput, StyleSheet, Pressable, ActivityIndicator } from 'react-native';
-import { CardField, useStripe } from '@stripe/stripe-react-native';
 import { createStripePaymentMethod } from '../adapters/stripeAdapter';
+import { sheetStrings } from '../i18n';
+
+/**
+ * The parts of `@stripe/stripe-react-native` this section uses. The module is
+ * an optional peer: required inside try/catch, which Metro treats as an
+ * optional dependency, so an app that only takes Mobile Money bundles without
+ * it. Importing it at the top of the file made the whole package need it.
+ */
+interface StripeModule {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  CardField: React.ComponentType<any>;
+  useStripe: () => {
+    createPaymentMethod?: (params: {
+      paymentMethodType: 'Card';
+      paymentMethodData?: { billingDetails?: { name?: string } };
+    }) => Promise<{ paymentMethod?: { id?: string } | null; error?: { message?: string } | null }>;
+  };
+}
+
+let stripeModule: StripeModule | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  stripeModule = require('@stripe/stripe-react-native') as StripeModule;
+} catch {
+  stripeModule = null;
+}
+
+/** Whether `@stripe/stripe-react-native` is installed in the app. */
+export const stripeInstalled: boolean = stripeModule !== null;
 
 export interface StripeCardSectionProps {
   cardholderName: string;
@@ -9,6 +37,8 @@ export interface StripeCardSectionProps {
   onPay: (paymentMethodId: string) => Promise<void>;
   submitting: boolean;
   error: string | null;
+  /** `fr` or `en`; English when absent. */
+  locale?: string | null;
 }
 
 /** Native Stripe card fields — requires `StripeProvider` at app root. */
@@ -18,14 +48,20 @@ export function StripeCardSection({
   onPay,
   submitting,
   error,
+  locale,
 }: StripeCardSectionProps) {
-  const { createPaymentMethod } = useStripe();
+  const t = sheetStrings(locale);
+  if (stripeModule === null) {
+    throw new Error('StripeCardSection needs @stripe/stripe-react-native. Install it, or take cards another way.');
+  }
+  const { CardField } = stripeModule;
+  const { createPaymentMethod } = stripeModule.useStripe();
   const [cardComplete, setCardComplete] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
   const pay = async () => {
     if (!createPaymentMethod) {
-      setLocalError('Stripe is not initialized. Wrap your app with StripeProvider.');
+      setLocalError(t.stripeNotInitialized);
       return;
     }
     setLocalError(null);
@@ -46,7 +82,7 @@ export function StripeCardSection({
       });
       await onPay(paymentMethodId);
     } catch (e) {
-      setLocalError(e instanceof Error ? e.message : 'Card payment failed');
+      setLocalError(e instanceof Error ? e.message : t.cardPaymentFailed);
     }
   };
 
@@ -55,14 +91,14 @@ export function StripeCardSection({
       {(error ?? localError) ? <Text style={styles.error}>{error ?? localError}</Text> : null}
       <TextInput
         style={styles.input}
-        placeholder="Cardholder name"
+        placeholder={t.cardholderName}
         value={cardholderName}
         onChangeText={onCardholderNameChange}
       />
       <CardField
         postalCodeEnabled={false}
         style={styles.cardField}
-        onCardChange={(details) => setCardComplete(details.complete)}
+        onCardChange={(details: { complete: boolean }) => setCardComplete(details.complete)}
       />
       <Pressable
         style={[styles.button, (submitting || !cardComplete) && styles.buttonDisabled]}
@@ -72,7 +108,7 @@ export function StripeCardSection({
         {submitting ? (
           <ActivityIndicator style={{}} />
         ) : (
-          <Text style={styles.buttonText}>Pay with card</Text>
+          <Text style={styles.buttonText}>{t.payWithCard}</Text>
         )}
       </Pressable>
     </View>

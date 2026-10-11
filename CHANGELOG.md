@@ -10,5 +10,19 @@
   socket did not carry (one that changed before the subscription, or a missed event) still
   reaches your callback within `intervalMs`. With realtime on, the callback is called when the
   result changes, not on every poll, and a final result stops the polling.
+- An ended session (`410`) is an `authentication_error` with `retryable: false`, and a server
+  error (`5xx`) an `api_error`. Both used to come back as a retryable `payment_error`. `param`
+  names the refused field when a refusal is about exactly one.
+- The 3D Secure or provider page opens on Android 11 and later without a `<queries>` block in your
+  manifest. The SDK asked `canOpenURL()` first, which Android answers `false` for https without
+  that declaration, and gave up. An https URL is now opened directly.
+- The payment sheet speaks French: `present({ locale: 'fr' })` asks for it, and without `locale`
+  the sheet follows the payment's own language. English otherwise. `StripeCardSection` takes a
+  `locale` prop for the same.
+- `@stripe/stripe-react-native` is really optional: the package no longer imports it at load time,
+  so an app that only takes Mobile Money bundles without it. Install it to take cards through
+  Stripe, as before.
+- `@react-native-community/netinfo` is declared as a peer dependency: the realtime client needs it
+  in a React Native bundle.
 
 Releases before 1.4.1 are described in the Git history.

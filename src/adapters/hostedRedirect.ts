@@ -1,10 +1,19 @@
 import { AppState, Linking } from 'react-native';
 
-/** Opens PSP URLs in the system browser — never an embedded WebView. */
+/**
+ * Opens PSP URLs in the system browser — never an embedded WebView.
+ *
+ * An https URL is opened directly. On Android 11 and later, canOpenURL()
+ * answers false unless the app declares a browser intent in a `<queries>`
+ * block, so asking first left the payer on a page that never opened. Every
+ * device has a browser for https; only another scheme is checked first.
+ */
 export async function openHostedRedirect(url: string): Promise<boolean> {
   try {
-    const supported = await Linking.canOpenURL(url);
-    if (!supported) return false;
+    if (!/^https:\/\//i.test(url)) {
+      const supported = await Linking.canOpenURL(url);
+      if (!supported) return false;
+    }
     await Linking.openURL(url);
     return true;
   } catch {

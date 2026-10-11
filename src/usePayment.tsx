@@ -10,7 +10,8 @@ import {
   ScrollView,
 } from 'react-native';
 import { handlePaymentAction } from './actionHandler';
-import { StripeCardSection } from './components/StripeCardSection';
+import { sheetStrings } from './i18n';
+import { StripeCardSection, stripeInstalled } from './components/StripeCardSection';
 import { createSession, WajubSession } from './WajubSession';
 import { hostedCardFieldError, isHostedCardField, isRedirectWalletChannel } from './mappers/paymentMapper';
 import type {
@@ -23,21 +24,7 @@ import type {
   SessionData,
 } from './types';
 
-const HOSTED_CARD_FIELD_LABELS: Record<HostedCardField, string> = {
-  first_name: 'First name',
-  last_name: 'Last name',
-  email: 'Email',
-  phone: 'Phone number',
-  address: 'Address',
-  city: 'City',
-  country: 'Country (2-letter code, e.g. CI)',
-  state: 'State / region',
-  zip_code: 'Postal code',
-};
-
 type PaymentTab = 'mobile_money' | 'card' | 'wallet';
-
-const TAB_LABELS: Record<PaymentTab, string> = { mobile_money: 'Mobile Money', card: 'Card', wallet: 'Wallet' };
 
 interface WajubContextValue {
   createSession: (token: string) => WajubSession;
@@ -69,12 +56,14 @@ export function usePayment() {
   const { createSession: factory } = useWajubContext();
   const [visible, setVisible] = useState(false);
   const [session, setSession] = useState<WajubSession | null>(null);
+  const [locale, setLocale] = useState<string | undefined>(undefined);
   const resolverRef = useRef<((result: PaymentResult | { cancelled: true }) => void) | null>(null);
 
   const present = useCallback(
     (options: PresentOptions): Promise<PaymentResult | { cancelled: true }> => {
       const wajubSession = factory(options.sessionToken);
       setSession(wajubSession);
+      setLocale(options.locale);
       setVisible(true);
       return new Promise((resolve) => {
         resolverRef.current = resolve;
@@ -94,6 +83,7 @@ export function usePayment() {
     <PaymentSheetModal
       visible={visible}
       session={session}
+      locale={locale}
       onDismiss={() => finish({ cancelled: true })}
       onResult={async (result) => {
         if ('cancelled' in result) {
@@ -112,11 +102,13 @@ export function usePayment() {
 interface PaymentSheetModalProps {
   visible: boolean;
   session: WajubSession;
+  /** The language `present()` asked for; the session's own when absent. */
+  locale?: string;
   onDismiss: () => void;
   onResult: (result: PaymentResult) => void;
 }
 
-function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentSheetModalProps) {
+function PaymentSheetModal({ visible, session, locale, onDismiss, onResult }: PaymentSheetModalProps) {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -132,6 +124,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
   const [email, setEmail] = useState('');
   const [billing, setBilling] = useState<Partial<Record<HostedCardField, string>>>({});
 
+  const t = sheetStrings(locale ?? sessionData?.locale);
   const hasCard = sessionData?.channels.some((c) => c.type.toLowerCase() === 'card') ?? false;
   const availableTabs: PaymentTab[] = [
     ...(momoChannels.length > 0 ? (['mobile_money'] as const) : []),
@@ -140,7 +133,8 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
   ];
   const cardSlug = session.cardChannelSlug() ?? 'card';
   const cardCfg = sdkConfig?.channels[cardSlug];
-  const stripeAvailable = cardCfg?.sdk === 'stripe_elements' && !!cardCfg.publishable_key;
+  // Stripe cards only when the app installed the optional Stripe module.
+  const stripeAvailable = stripeInstalled && cardCfg?.sdk === 'stripe_elements' && !!cardCfg.publishable_key;
   // Paystack / Flutterwave: the PSP's own hosted checkout collects the card
   // and runs PIN/OTP/AVS (see WajubSession.payCardHosted()).
   const clientSessionAvailable = cardCfg?.client_session === true;
@@ -172,7 +166,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
         setCountry(momo[0]?.countries[0] ?? 'CM');
         setTab(momo.length > 0 ? 'mobile_money' : card ? 'card' : wallets.length > 0 ? 'wallet' : 'mobile_money');
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load session');
+        setError(e instanceof Error ? e.message : t.loadFailed);
       } finally {
         setLoading(false);
       }
@@ -192,7 +186,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
       const result = await session.payMobileMoney(input);
       onResult(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Payment failed');
+      setError(e instanceof Error ? e.message : t.paymentFailed);
       setSubmitting(false);
     }
   };
@@ -204,7 +198,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
       const result = await session.payCard(cardSlug, paymentMethodId, cardholderName.trim() || null);
       onResult(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Card payment failed');
+      setError(e instanceof Error ? e.message : t.cardPaymentFailed);
       setSubmitting(false);
     }
   };
@@ -216,7 +210,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
       const result = await session.payWallet(channel.slug);
       onResult(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Payment failed');
+      setError(e instanceof Error ? e.message : t.paymentFailed);
       setSubmitting(false);
     }
   };
@@ -228,7 +222,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
       const result = await session.payCardHosted(cardSlug, { email: email.trim() || null });
       onResult(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Card payment failed');
+      setError(e instanceof Error ? e.message : t.cardPaymentFailed);
       setSubmitting(false);
     }
   };
@@ -240,7 +234,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
       const result = await session.payCardHostedRedirect(cardSlug, billing);
       onResult(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Card payment failed');
+      setError(e instanceof Error ? e.message : t.cardPaymentFailed);
       setSubmitting(false);
     }
   };
@@ -250,7 +244,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
       <View style={styles.backdrop}>
         <View style={styles.sheet}>
           <View style={styles.header}>
-            <Text style={styles.title}>Pay with Wajub</Text>
+            <Text style={styles.title}>{t.title}</Text>
             <Pressable onPress={onDismiss} hitSlop={8}>
               <Text style={styles.close}>✕</Text>
             </Pressable>
@@ -258,9 +252,9 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
 
           {availableTabs.length > 1 ? (
             <View style={styles.tabs}>
-              {availableTabs.map((t) => (
-                <Pressable key={t} style={[styles.tab, tab === t && styles.tabActive]} onPress={() => setTab(t)}>
-                  <Text style={tab === t ? styles.tabTextActive : styles.tabText}>{TAB_LABELS[t]}</Text>
+              {availableTabs.map((option) => (
+                <Pressable key={option} style={[styles.tab, tab === option && styles.tabActive]} onPress={() => setTab(option)}>
+                  <Text style={tab === option ? styles.tabTextActive : styles.tabText}>{t.tabs[option]}</Text>
                 </Pressable>
               ))}
             </View>
@@ -271,7 +265,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
           ) : tab === 'wallet' ? (
             <>
               {error ? <Text style={styles.error}>{error}</Text> : null}
-              <Text style={styles.hint}>You will approve the payment in the wallet app.</Text>
+              <Text style={styles.hint}>{t.walletHint}</Text>
               {walletChannels.map((ch) => (
                 <Pressable
                   key={ch.slug}
@@ -279,13 +273,13 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
                   onPress={() => payWallet(ch)}
                   disabled={submitting}
                 >
-                  <Text style={styles.buttonText}>{submitting ? 'Processing…' : `Pay with ${ch.name}`}</Text>
+                  <Text style={styles.buttonText}>{submitting ? t.processing : t.payWith(ch.name)}</Text>
                 </Pressable>
               ))}
             </>
           ) : tab === 'mobile_money' ? (
             momoChannels.length === 0 ? (
-              <Text>No Mobile Money channels available.</Text>
+              <Text>{t.noMobileMoney}</Text>
             ) : (
               <>
                 {error ? <Text style={styles.error}>{error}</Text> : null}
@@ -307,7 +301,7 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
                 </ScrollView>
                 <TextInput
                   style={styles.input}
-                  placeholder="Phone number"
+                  placeholder={t.phoneNumber}
                   keyboardType="phone-pad"
                   value={phone}
                   onChangeText={setPhone}
@@ -317,12 +311,12 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
                   onPress={payMomo}
                   disabled={submitting || !phone.trim()}
                 >
-                  <Text style={styles.buttonText}>{submitting ? 'Processing…' : 'Pay now'}</Text>
+                  <Text style={styles.buttonText}>{submitting ? t.processing : t.payNow}</Text>
                 </Pressable>
               </>
             )
           ) : !hasCard ? (
-            <Text>No card channel available.</Text>
+            <Text>{t.noCardChannel}</Text>
           ) : stripeAvailable ? (
             <StripeCardSection
               cardholderName={cardholderName}
@@ -330,14 +324,15 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
               onPay={payCard}
               submitting={submitting}
               error={error}
+              locale={locale ?? sessionData?.locale}
             />
           ) : clientSessionAvailable ? (
             <>
               {error ? <Text style={styles.error}>{error}</Text> : null}
-              <Text style={styles.hint}>You will complete the payment on the provider's secure page.</Text>
+              <Text style={styles.hint}>{t.providerPageHint}</Text>
               <TextInput
                 style={styles.input}
-                placeholder="Email (for your receipt)"
+                placeholder={t.emailForReceipt}
                 keyboardType="email-address"
                 autoCapitalize="none"
                 value={email}
@@ -348,18 +343,18 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
                 onPress={payCardHosted}
                 disabled={submitting}
               >
-                <Text style={styles.buttonText}>{submitting ? 'Waiting for payment…' : 'Pay by card'}</Text>
+                <Text style={styles.buttonText}>{submitting ? t.waitingForPayment : t.payByCard}</Text>
               </Pressable>
             </>
           ) : hostedRedirectAvailable ? (
             <>
               {error ? <Text style={styles.error}>{error}</Text> : null}
-              <Text style={styles.hint}>You will complete the payment on the provider's secure page.</Text>
+              <Text style={styles.hint}>{t.providerPageHint}</Text>
               {redirectFields.map((field) => (
                 <TextInput
                   key={field}
                   style={styles.input}
-                  placeholder={HOSTED_CARD_FIELD_LABELS[field]}
+                  placeholder={t.fields[field]}
                   keyboardType={field === 'email' ? 'email-address' : field === 'phone' ? 'phone-pad' : 'default'}
                   autoCapitalize={field === 'email' ? 'none' : field === 'country' ? 'characters' : 'words'}
                   maxLength={field === 'country' ? 2 : undefined}
@@ -372,11 +367,11 @@ function PaymentSheetModal({ visible, session, onDismiss, onResult }: PaymentShe
                 onPress={payCardRedirect}
                 disabled={submitting || !redirectFieldsValid}
               >
-                <Text style={styles.buttonText}>{submitting ? 'Processing…' : 'Pay by card'}</Text>
+                <Text style={styles.buttonText}>{submitting ? t.processing : t.payByCard}</Text>
               </Pressable>
             </>
           ) : (
-            <Text>Card payments unavailable for this session.</Text>
+            <Text>{t.cardUnavailable}</Text>
           )}
         </View>
       </View>
