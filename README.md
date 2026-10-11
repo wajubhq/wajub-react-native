@@ -17,7 +17,7 @@ PaymentSheet modal
         ↓
 POST /pay/process → handlePaymentAction (redirect/3DS via system browser)
         ↓
-watchStatus() → Pusher or polling until terminal
+watchStatus() → Pusher and polling until terminal
 ```
 
 ## Requirements
@@ -75,7 +75,7 @@ if ('cancelled' in outcome) return;
 | Card via PayPal / Mollie / Paddle / Kkiapay / FedaPay / PayDunya / CinetPay (`hosted_redirect`) | PSP's own page in the system browser; the sheet first asks for the sdk-config `required_fields` (e.g. email, CinetPay billing) — headless: `session.payCardHostedRedirect(channel, billing)` |
 | One-tap wallets, e.g. Djamo (`wallet` channel, `form`, no `required_fields`) | "Wallet" tab — headless: `session.payWallet(channel)`, then open the redirect |
 | Redirect / 3DS | `Linking.openURL` (system browser) |
-| Realtime | `pusher-js` + polling fallback |
+| Realtime | `pusher-js`, with polling running next to it |
 
 ## Headless integration
 

@@ -38,7 +38,11 @@ async function pollLoop(
   }
 }
 
-/** Pusher/Reverb with polling fallback — mirrors checkout `realtime.ts`. */
+/**
+ * Pusher/Reverb for speed, with polling running next to it for the whole watch:
+ * a socket only carries what happens after it subscribed, and a connected one
+ * can still miss an event.
+ */
 export function subscribeStatus(
   client: PayClient,
   token: string,
@@ -87,34 +91,41 @@ function subscribePusher(
     },
   });
 
-  const channelName = `${echo.channel_prefix}${session.transaction.reference}`;
+  // The API publishes on the payment's Wajub id and its authorizer signs that
+  // channel only. `reference` is the merchant's own: nothing is published there.
+  const channelName = `${echo.channel_prefix}${session.transaction.id}`;
   const channel = pusher.subscribe(channelName);
 
-  channel.bind('PaymentStatusUpdated', (data: { status: string }) => {
-    const result = mapStatusToResult(data.status, session.transaction);
+  // Two sources for one status: a result goes out when it changes, and a final
+  // one from the socket stops the polling.
+  const signal = { active: true };
+  let last: PaymentResult['status'] | null = null;
+  const deliver = (result: PaymentResult) => {
+    if (result.status === last) return;
+    last = result.status;
     onUpdate(result);
-  });
+  };
 
-  let pollStop: (() => void) | null = null;
-  const fallbackTimer = setTimeout(() => {
-    if (pusher.connection.state !== 'connected') {
-      const signal = { active: true };
-      void pollLoop(client, token, intervalMs, onUpdate, signal);
-      pollStop = () => {
-        signal.active = false;
-      };
+  channel.bind('PaymentStatusUpdated', (data: { status: string }) => {
+    if (TERMINAL.has(data.status.toLowerCase())) {
+      signal.active = false;
     }
-  }, 10_000);
-
-  pusher.connection.bind('connected', () => {
-    clearTimeout(fallbackTimer);
-    pollStop?.();
-    pollStop = null;
+    deliver(mapStatusToResult(data.status, session.transaction));
   });
+
+  void pollLoop(
+    client,
+    token,
+    intervalMs,
+    (result) => {
+      // An answer that was on its way when the polling stopped is out of date.
+      if (signal.active) deliver(result);
+    },
+    signal,
+  );
 
   return () => {
-    clearTimeout(fallbackTimer);
-    pollStop?.();
+    signal.active = false;
     pusher.unsubscribe(channelName);
     pusher.disconnect();
   };
