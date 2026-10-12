@@ -152,6 +152,21 @@ export class WajubSession {
     return result.redirect_url;
   }
 
+  /**
+   * For a payment sheet the payer closed. When nothing had been `submitted`,
+   * the payment is cancelled on Wajub too (`POST /pay/cancel`), as the hosted
+   * checkout does; an attempt under way is left alone, since a Mobile Money
+   * approval can still land. Best effort: it never rejects.
+   */
+  async cancelIfNothingSubmitted(submitted: boolean): Promise<void> {
+    if (submitted) return;
+    try {
+      await this.cancel();
+    } catch {
+      /* best-effort */
+    }
+  }
+
   watchStatus(onUpdate: (result: PaymentResult) => void, intervalMs = 5000): () => void {
     let stop: (() => void) | null = null;
     void this.loadSession().then((session) => {

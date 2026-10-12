@@ -8,6 +8,13 @@ describe('WajubError.fromHttp', () => {
     expect(error.retryable).toBe(false);
   });
 
+  it.each([401, 404])('reads a token that is not a session (%i) as an authentication error the payer cannot retry', (status) => {
+    const error = WajubError.fromHttp(status, 'Payment session not found', 'session_not_found', {});
+
+    expect(error.type).toBe('authentication_error');
+    expect(error.retryable).toBe(false);
+  });
+
   it('reads a server error as Wajub side, not as a declined payment', () => {
     const error = WajubError.fromHttp(503, 'Unavailable', 'service_unavailable', {});
 

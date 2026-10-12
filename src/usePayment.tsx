@@ -58,12 +58,16 @@ export function usePayment() {
   const [session, setSession] = useState<WajubSession | null>(null);
   const [locale, setLocale] = useState<string | undefined>(undefined);
   const resolverRef = useRef<((result: PaymentResult | { cancelled: true }) => void) | null>(null);
+  // Whether the payer submitted anything: closing the sheet before that
+  // cancels the payment on Wajub too.
+  const submittedRef = useRef(false);
 
   const present = useCallback(
     (options: PresentOptions): Promise<PaymentResult | { cancelled: true }> => {
       const wajubSession = factory(options.sessionToken);
       setSession(wajubSession);
       setLocale(options.locale);
+      submittedRef.current = false;
       setVisible(true);
       return new Promise((resolve) => {
         resolverRef.current = resolve;
@@ -84,7 +88,13 @@ export function usePayment() {
       visible={visible}
       session={session}
       locale={locale}
-      onDismiss={() => finish({ cancelled: true })}
+      onSubmit={() => {
+        submittedRef.current = true;
+      }}
+      onDismiss={() => {
+        void session.cancelIfNothingSubmitted(submittedRef.current);
+        finish({ cancelled: true });
+      }}
       onResult={async (result) => {
         if ('cancelled' in result) {
           finish(result);
@@ -104,11 +114,13 @@ interface PaymentSheetModalProps {
   session: WajubSession;
   /** The language `present()` asked for; the session's own when absent. */
   locale?: string;
+  /** Called as the payer submits a payment. */
+  onSubmit: () => void;
   onDismiss: () => void;
   onResult: (result: PaymentResult) => void;
 }
 
-function PaymentSheetModal({ visible, session, locale, onDismiss, onResult }: PaymentSheetModalProps) {
+function PaymentSheetModal({ visible, session, locale, onSubmit, onDismiss, onResult }: PaymentSheetModalProps) {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -173,9 +185,14 @@ function PaymentSheetModal({ visible, session, locale, onDismiss, onResult }: Pa
     })();
   }, [visible, session]);
 
+  const start = () => {
+    setSubmitting(true);
+    onSubmit();
+  };
+
   const payMomo = async () => {
     if (!selected) return;
-    setSubmitting(true);
+    start();
     setError(null);
     try {
       const input: MobileMoneyInput = {
@@ -192,7 +209,7 @@ function PaymentSheetModal({ visible, session, locale, onDismiss, onResult }: Pa
   };
 
   const payCard = async (paymentMethodId: string) => {
-    setSubmitting(true);
+    start();
     setError(null);
     try {
       const result = await session.payCard(cardSlug, paymentMethodId, cardholderName.trim() || null);
@@ -204,7 +221,7 @@ function PaymentSheetModal({ visible, session, locale, onDismiss, onResult }: Pa
   };
 
   const payWallet = async (channel: SessionChannel) => {
-    setSubmitting(true);
+    start();
     setError(null);
     try {
       const result = await session.payWallet(channel.slug);
@@ -216,7 +233,7 @@ function PaymentSheetModal({ visible, session, locale, onDismiss, onResult }: Pa
   };
 
   const payCardHosted = async () => {
-    setSubmitting(true);
+    start();
     setError(null);
     try {
       const result = await session.payCardHosted(cardSlug, { email: email.trim() || null });
@@ -228,7 +245,7 @@ function PaymentSheetModal({ visible, session, locale, onDismiss, onResult }: Pa
   };
 
   const payCardRedirect = async () => {
-    setSubmitting(true);
+    start();
     setError(null);
     try {
       const result = await session.payCardHostedRedirect(cardSlug, billing);
