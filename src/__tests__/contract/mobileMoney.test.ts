@@ -56,6 +56,9 @@ describe('MM — Mobile Money', () => {
       expect([v.input, toE164(v.input, v.country)]).toEqual([v.input, v.e164]);
       expect([v.input, formatAsYouType(v.input)]).toEqual([v.input, v.formatted]);
     }
+    // A country outside the tables keeps an international number valid E.164.
+    expect(toE164('+260971234567', 'ZM')).toBe('+260971234567');
+    expect(toE164('00260 97 123 4567', 'ZM')).toBe('+260971234567');
   });
 
   it('MM-02 matches the mismatch vectors', () => {
@@ -194,9 +197,10 @@ describe('AL — Altcha', () => {
     api.restore();
 
     // Refused (422): the session is read again for a new challenge, solved, and the request sent once more.
+    // The API names no error_code: a malformed solution comes under `data.altcha`, a wrong one only by its message.
     const refused = {
       status: 422,
-      body: { code: 422, status: 'Unprocessable Content', message: 'Security challenge verification failed', errors: { request: ['Security challenge verification failed'] } },
+      body: { code: 422, status: 'Unprocessable Content', message: 'The data.altcha field must be an array.', errors: { 'data.altcha': ['The data.altcha field must be an array.'] } },
     };
     const fresh = body('session-cm-aggregate');
     fresh.altcha = { ...raw.altcha, challenge: sha256Hex(`${salt}77`) };
@@ -216,6 +220,44 @@ describe('AL — Altcha', () => {
     expect(sent).toEqual([4242, 77]);
     expect(card.controller.getSnapshot().state).toBe('PENDING');
     card.controller.hostGone();
+    api.restore();
+
+    // Refused by message only (a wrong solution), twice: security_check_failed, retryable.
+    const wrong = {
+      status: 422,
+      body: {
+        code: 422,
+        status: 'Unprocessable Entity',
+        message: 'Security challenge verification failed. Please refresh the page and try again.',
+        errors: { request: ['Security challenge verification failed. Please refresh the page and try again.'] },
+      },
+    };
+    api = fakeApi({
+      'GET /pay/session': [{ status: 200, body: raw }, { status: 200, body: fresh }],
+      'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+      'POST /pay/process': [wrong, wrong, 'process-processing-mobile-money-live'],
+      'GET /pay/status': 'status-processing',
+    });
+    const twice = makeController();
+    twice.controller.start();
+    await settle();
+    twice.controller.chooseMethod('mobile_money');
+    const mtn2 = operatorChoices(twice.controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+    await twice.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn2, pickedByHand: true });
+    await settle(30);
+    expect(api.callsTo('POST /pay/process')).toHaveLength(2);
+    expect(twice.controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { code: 'security_check_failed', retryable: true } });
+    // Try again: a new attempt with a new challenge, not the solution already sent.
+    twice.controller.tryAgain();
+    await settle(30);
+    await twice.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn2, pickedByHand: true });
+    await settle();
+    const numbers = api.callsTo('POST /pay/process').map((c) => `${c.body.data.altcha.challenge}:${c.body.data.altcha.number}`);
+    expect(numbers).toHaveLength(3);
+    expect(new Set(numbers).size).toBe(2);
+    expect(numbers[2]).not.toBe(numbers[0]);
+    expect(twice.controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    twice.controller.hostGone();
     api.restore();
 
     // Closed while the challenge is still being solved: cancelled, and nothing is charged.

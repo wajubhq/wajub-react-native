@@ -14,7 +14,7 @@
     "!src/test"
   ],
   "scripts": {
-    "build": "node -e \"require('fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "build": "node -e \"require('fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "test": "jest",
     "lint": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "npm run lint && npm test && npm run build",
@@ -31,14 +31,12 @@
     "react-native": ">=0.74"
   },
   "peerDependenciesMeta": {
-    "@react-native-async-storage/async-storage": {
-      "optional": true
-    },
     "@stripe/stripe-react-native": {
       "optional": true
     }
   },
   "devDependencies": {
+    "@react-native-async-storage/async-storage": "^2.1.2",
     "@react-native/babel-preset": "^0.76.9",
     "@stripe/stripe-react-native": "^0.41.0",
     "@testing-library/react-native": "^12.9.0",

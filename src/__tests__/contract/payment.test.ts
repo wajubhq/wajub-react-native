@@ -5,7 +5,7 @@ import { operatorChoices } from '../../mobileMoney/form';
 import { makeController } from '../../test/checkout';
 import { body, fakeApi, settle } from '../../test/fakeApi';
 import type { Answer, FakeApi } from '../../test/fakeApi';
-import type { PresentOptions } from '../../types';
+import type { PresentOptions, SdkFlavor } from '../../types';
 import { parseSdkConfig } from '../../wire/parse';
 
 let api: FakeApi;
@@ -68,8 +68,9 @@ describe('CD — card', () => {
     expect(flavor('sdk-config-sandbox', false)).toBeNull();
     const adyen = parseSdkConfig(body('sdk-config-card-adyen')).channels.card;
     expect(cardFlavor({ ...adyen, client_session: false }, false)).toBeNull();
-    expect(cardFlavor({ ...adyen, client_session: undefined, sdk: 'psp_inline' }, false)).toBeNull();
-    expect(cardFlavor({ ...adyen, client_session: undefined, sdk: 'apple_pay' }, false)).toBeNull();
+    // Values the 1.4 SdkFlavor type does not name still arrive from the API.
+    expect(cardFlavor({ ...adyen, client_session: undefined, sdk: 'psp_inline' as SdkFlavor }, false)).toBeNull();
+    expect(cardFlavor({ ...adyen, client_session: undefined, sdk: 'apple_pay' as SdkFlavor }, false)).toBeNull();
     expect(cardFlavor({ ...adyen, available: false }, false)).toBeNull();
     expect(cardFlavor(undefined, false)).toBeNull();
   });
@@ -238,7 +239,7 @@ describe('PA — process answers', () => {
     await settle();
     expect(api.callsTo('POST /pay/process')[0].body.channel).toBe('cm.mtn');
     expect(mismatch.controller.getSnapshot().fieldErrors.phone).toBe(
-      'This is a Orange Money number. Pick Orange Money in the list, or enter a MTN MoMo number.',
+      'This number belongs to Orange Money. Pick Orange Money in the list, or enter a MTN MoMo number.',
     );
     mismatch.controller.hostGone();
     api.restore();
@@ -295,8 +296,48 @@ describe('PA — process answers', () => {
     paid.controller.hostGone();
     api.restore();
 
-    // 400 and a status that has not ended: not_processable.
-    const stuck = await payMtn('process-400-not-processable');
+    // While the status is read, Pay stays disabled: a second press sends nothing.
+    let statusRead!: () => void;
+    const reading = new Promise<void>((resolve) => (statusRead = resolve));
+    const busy = await sheet({ 'GET /pay/session': 'session-cm-aggregate', 'GET /pay/sdk-config': 'sdk-config-cm-stripe', 'POST /pay/process': 'process-400-not-processable', 'GET /pay/status': 'status-succeeded' });
+    const realFetch = api.fetch.getMockImplementation()!;
+    api.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/pay/status')) await reading;
+      return realFetch(url, init);
+    });
+    busy.controller.chooseMethod('mobile_money');
+    const mtn400 = operatorChoices(busy.controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+    const paying = busy.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn400, pickedByHand: true });
+    await settle();
+    expect(busy.controller.getSnapshot()).toMatchObject({ busy: true, canCancel: false });
+    await busy.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn400, pickedByHand: true });
+    expect(api.callsTo('POST /pay/process')).toHaveLength(1);
+    statusRead();
+    await paying;
+    await settle();
+    expect(busy.controller.getSnapshot()).toMatchObject({ state: 'SUCCESS', busy: false });
+    busy.controller.hostGone();
+    api.restore();
+
+    // 400 and an attempt under way (`processing`): PENDING, watched — money may move.
+    const running = await payMtn('process-400-not-processable');
+    expect(running.controller.getSnapshot()).toMatchObject({ state: 'PENDING', screen: { name: 'pending' }, busy: false });
+    running.controller.dismiss();
+    await expect(running.controller.result).resolves.toMatchObject({ status: 'processing' });
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+    api.restore();
+
+    // 400 and a status neither ended nor processing: not_processable.
+    const stuck = await sheet({
+      'GET /pay/session': 'session-cm-aggregate',
+      'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+      'POST /pay/process': 'process-400-not-processable',
+      'GET /pay/status': { status: 200, body: { transaction: { reference: 'trx_PVrU8x2kQ1mNa7Lb3cDe', status: 'pending' } } },
+    });
+    stuck.controller.chooseMethod('mobile_money');
+    const choice = operatorChoices(stuck.controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+    await stuck.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice, pickedByHand: true });
+    await settle();
     expect(stuck.controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { code: 'not_processable' } });
     stuck.controller.hostGone();
     api.restore();
@@ -304,6 +345,34 @@ describe('PA — process answers', () => {
     const ended = await payMtn('error-410-process-session-ended');
     expect(ended.controller.getSnapshot()).toMatchObject({ state: 'EXPIRED', screen: { name: 'expired', error: { code: 'session_terminal_expired' } } });
     ended.controller.hostGone();
+  });
+
+  it('PA-01 reads a 2xx without a transaction as an unknown outcome', async () => {
+    const s = await payMtn({ status: 202, body: { code: 202, status: 'Accepted', message: 'Accepted.' } });
+    // Watched, never a failure: the charge may be running.
+    expect(s.controller.getSnapshot()).toMatchObject({ state: 'PENDING', screen: { name: 'pending' } });
+    expect(s.onError).not.toHaveBeenCalled();
+    s.controller.dismiss();
+    await expect(s.controller.result).resolves.toMatchObject({ status: 'processing' });
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+  });
+
+  it('PA-02 fires nothing after the sheet closed', async () => {
+    // The browser answers only after the host went away: no failure is reported after onComplete.
+    let opened!: (value: boolean) => void;
+    const events: string[] = [];
+    const s = await sheet(
+      { 'GET /pay/session': 'session-cm-aggregate', 'GET /pay/sdk-config': 'sdk-config-card-kkiapay', 'POST /pay/process': 'process-redirect-card-hosted' },
+      { onError: () => events.push('error'), onComplete: (r) => events.push(`complete:${r.status}`) },
+    );
+    s.openUrl.mockImplementation(() => new Promise<boolean>((resolve) => (opened = resolve)));
+    s.controller.chooseMethod('card');
+    await s.controller.payCard({ email: 'awa.ngono@example.com' });
+    await settle();
+    s.controller.hostGone();
+    opened(false);
+    await settle();
+    expect(events).toEqual(['complete:processing']);
   });
 
   it('PA-10 fires payment started on the first 2xx', async () => {

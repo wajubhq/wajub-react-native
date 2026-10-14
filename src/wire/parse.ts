@@ -15,6 +15,7 @@ import type {
   SavedMethod,
   SdkChannelConfig,
   SdkConfig,
+  SdkFlavor,
   SessionChannel,
   SessionData,
   SessionTransaction,
@@ -254,7 +255,7 @@ export function parseSession(raw: unknown): SessionData {
     channels: arr(body.channels)
       .map(parseChannel)
       .filter((c): c is SessionChannel => !!c),
-    branding: parseBranding(body.branding),
+    parsedBranding: parseBranding(body.branding),
     altcha: parseAltcha(body.altcha),
     return_url: nullable(text(body.return_url)),
     cancel_url: nullable(text(body.cancel_url)),
@@ -262,6 +263,9 @@ export function parseSession(raw: unknown): SessionData {
   };
   const locale = text(body.locale);
   if (locale) session.locale = locale;
+  // As the API sent it, for code written against 1.4 (some values are numbers or booleans).
+  const branding = obj(body.branding);
+  if (branding) session.branding = branding as Record<string, string | null>;
   const echo = parseEcho(body.echo);
   if (echo) session.echo = echo;
   const features = obj(body.features);
@@ -283,7 +287,8 @@ export function parseSdkConfig(raw: unknown): SdkConfig {
     const entry: SdkChannelConfig = {
       available: bool(c.available) ?? false,
       provider: nullable(str(c.provider)),
-      sdk: nullable(str(c.sdk)),
+      // The API may send flavours the 1.4 type does not name (`psp_inline`…).
+      sdk: nullable(str(c.sdk)) as SdkFlavor | null,
       publishable_key: nullable(text(c.publishable_key)),
       required_fields: arr(c.required_fields)
         .map((f) => str(f))

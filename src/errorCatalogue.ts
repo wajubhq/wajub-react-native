@@ -90,7 +90,7 @@ export const ERROR_CATALOGUE: Record<string, Entry> = {
   phone_required: form('Enter the Mobile Money number to pay with.', 'Saisissez le numéro Mobile Money qui va payer.'),
   invalid_phone: form('Invalid phone number', 'Numéro de téléphone invalide'),
   operator_mismatch: form(
-    'This is a {detected} number. Pick {detected} in the list, or enter a {selected} number.',
+    'This number belongs to {detected}. Pick {detected} in the list, or enter a {selected} number.',
     'Ce numéro est un numéro {detected}. Choisissez {detected} dans la liste, ou saisissez un numéro {selected}.',
   ),
   operator_required: form('Choose your Mobile Money operator.', 'Choisissez votre opérateur Mobile Money.'),

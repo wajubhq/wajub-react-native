@@ -1,7 +1,7 @@
 import { AppState, Linking } from 'react-native';
 
 import { PayClient } from '../client/payClient';
-import { mapProcessResponse } from '../mappers/paymentMapper';
+import { mapProcessOutcome, mapProcessResponse } from '../mappers/paymentMapper';
 import { UNSUPPORTED_ACTION_CODE } from '../types';
 import type { SessionTransaction } from '../types';
 import { WajubSession } from '../WajubSession';
@@ -50,27 +50,35 @@ describe('mapProcessResponse — client sessions and unsupported actions', () =>
     });
   });
 
+  it.each(['confirm_otp', 'confirm_pin', 'confirm_phone', 'confirm_birthday', 'confirm_address', 'card_reauth'])(
+    'fails explicitly on %s instead of leaving the payer on an endless spinner',
+    (action) => {
+      const result = mapProcessResponse({ code: 202, status: 'Accepted', message: 'ok', action, transaction: txn }, 'card');
+
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') {
+        expect(result.error.code).toBe(UNSUPPORTED_ACTION_CODE);
+        expect(result.error.message).toContain(action);
+      }
+    },
+  );
+
+  // Spec v2's reading (WajubSession.submit()): the steps come with their id.
   it.each([
     ['confirm_otp', 'otp_id', 'otp_masked_contact'],
     ['confirm_pin', 'pin_id', 'pin_instruction'],
     ['confirm_phone', 'phone_id', 'phone_instruction'],
     ['confirm_birthday', 'birthday_id', 'birthday_instruction'],
     ['confirm_address', 'address_id', 'address_instruction'],
-  ])('maps %s to a step the payer can confirm with its id', (action, idKey, hintKey) => {
-    const result = mapProcessResponse({ code: 202, status: 'Accepted', message: 'ok', action, transaction: txn, [idKey]: 'prc_1', [hintKey]: 'hint' }, 'card');
+  ])('mapProcessOutcome maps %s to a step with its id and hint', (action, idKey, hintKey) => {
+    const outcome = mapProcessOutcome({ code: 202, status: 'Accepted', message: 'ok', action, transaction: txn, [idKey]: 'prc_1', [hintKey]: 'hint' }, 'card');
 
-    expect(result).toMatchObject({ status: 'requires_action', action, stepId: 'prc_1', hint: 'hint' });
-  });
-
-  it.each(['card_reauth', 'confirm_otp'])('fails explicitly on %s it cannot perform instead of leaving the payer on an endless spinner', (action) => {
-    // confirm_otp without its otp_id is missing what it needs.
-    const result = mapProcessResponse({ code: 202, status: 'Accepted', message: 'ok', action, transaction: txn }, 'card');
-
-    expect(result.status).toBe('failed');
-    if (result.status === 'failed') {
-      expect(result.error.code).toBe(UNSUPPORTED_ACTION_CODE);
-      expect(result.error.api_message).toContain(action);
-    }
+    expect(outcome).toMatchObject({ status: 'requires_action', action, stepId: 'prc_1', hint: 'hint', url: null });
+    // Without its id: unsupported.
+    expect(mapProcessOutcome({ code: 202, status: 'Accepted', message: 'ok', action, transaction: txn }, 'card')).toMatchObject({
+      status: 'failed',
+      error: { code: UNSUPPORTED_ACTION_CODE, retryable: false },
+    });
   });
 
   it('still treats a bare 202 without action as processing', () => {

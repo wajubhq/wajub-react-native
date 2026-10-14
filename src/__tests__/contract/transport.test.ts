@@ -1,8 +1,11 @@
 import { PayClient, TIMEOUTS } from '../../client/payClient';
+import { createSession } from '../../WajubSession';
 import { API_URL } from '../../types';
+import type { WajubStorage } from '../../types';
 import { WajubError } from '../../WajubError';
 import { makeController } from '../../test/checkout';
 import { body, fakeApi, fixture, settle } from '../../test/fakeApi';
+import { sha256Hex } from '../../crypto';
 import type { FakeApi } from '../../test/fakeApi';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -34,6 +37,17 @@ describe('TR — transport', () => {
     expect(api.calls[1].headers['Content-Type']).toBe('application/json');
   });
 
+  // TR-02 (SHOULD) is not met on React Native: fetch cannot read the platform's
+  // own User-Agent (okhttp/…, CFNetwork/…) to append X-Wajub-Client to it, and
+  // replacing it would lose what the API's risk rules read. The SDK leaves it
+  // to the platform; X-Wajub-Client and data._client.client carry the SDK's name.
+  it('TR-02 leaves the platform user agent alone (it cannot be suffixed from JavaScript)', async () => {
+    api = fakeApi({ 'GET /pay/status': 'status-processing' });
+    await new PayClient(instant).getStatus('tok');
+    expect(api.calls[0].headers['User-Agent']).toBeUndefined();
+    expect(api.calls[0].headers['X-Wajub-Client']).toMatch(/^wajub-react-native\/1\.5\.0 /);
+  });
+
   it('TR-03 sends device signals', async () => {
     api = fakeApi({ 'POST /pay/process': 'process-processing-mobile-money-sandbox' });
     await new PayClient(instant).process('tok', 'cm.mobile', { phone: '+237670000000', country: 'CM' });
@@ -50,41 +64,48 @@ describe('TR — transport', () => {
   });
 
   it('TR-04 keeps a stable install fingerprint', async () => {
-    const storage = new Map<string, string>();
-    jest.doMock(
-      '@react-native-async-storage/async-storage',
-      () => ({
-        default: {
-          getItem: async (key: string) => storage.get(key) ?? null,
-          setItem: async (key: string, value: string) => void storage.set(key, value),
-        },
-      }),
-      { virtual: true },
-    );
-    const load = () => {
+    // @react-native-async-storage/async-storage, through the package's own jest mock.
+    const AsyncStorage = jest.requireActual('@react-native-async-storage/async-storage/jest/async-storage-mock');
+    const load = (storage?: WajubStorage) => {
       let device!: typeof import('../../client/device');
       jest.isolateModules(() => {
+        jest.doMock('@react-native-async-storage/async-storage', () => AsyncStorage);
         device = require('../../client/device');
       });
-      return device.installFingerprint();
+      return device.installFingerprint(storage);
     };
 
     const first = await load();
     // The SDK restarts (a fresh module, as after an app restart): same id from storage, same fingerprint.
     const second = await load();
-    jest.dontMock('@react-native-async-storage/async-storage');
-
     expect(second).toBe(first);
-    const id = storage.get('@wajub/install-id')!;
+    const id = await AsyncStorage.getItem('@wajub/install-id');
     expect(id).toMatch(UUID);
-    const { sha256Hex } = require('../../crypto');
     expect(first).toBe(sha256Hex(`device:${id}`));
+
+    // The host's own storage, given to present() or createSession().
+    const items = new Map<string, string>();
+    const adapter: WajubStorage = {
+      getItem: jest.fn(async (key: string) => items.get(key) ?? null),
+      setItem: jest.fn(async (key: string, value: string) => void items.set(key, value)),
+    };
+    const hosted = await load(adapter);
+    expect(await load(adapter)).toBe(hosted);
+    expect(adapter.setItem).toHaveBeenCalledTimes(1);
+    expect(hosted).toBe(sha256Hex(`device:${items.get('@wajub/install-id')}`));
+
+    api = fakeApi({ 'POST /pay/process': 'process-processing-mobile-money-sandbox' });
+    await createSession('tok', new PayClient(instant), { storage: adapter }).submit('cm.mobile', { phone: '+237670000000', country: 'CM' });
+    await new PayClient({ ...instant, storage: adapter }).process('tok', 'cm.mobile', {});
+    const fingerprints = api.callsTo('POST /pay/process').map((c) => c.body.data._client.fingerprint);
+    const { installFingerprint } = require('../../client/device') as typeof import('../../client/device');
+    expect(fingerprints).toEqual([await installFingerprint(adapter), await installFingerprint(adapter)]);
   });
 
   it('TR-05 applies per-call timeouts', async () => {
     jest.useFakeTimers();
     api = fakeApi({ 'GET /pay/session': 'hang', 'POST /pay/process': 'hang', 'POST /pay/otp/verify': 'hang' });
-    const client = new PayClient({ sleep: async () => undefined });
+    const client = new PayClient({ sleep: async () => undefined, errors: 'v2' });
 
     const read = client.getSession('tok').catch((e: WajubError) => e);
     await jest.advanceTimersByTimeAsync(TIMEOUTS.requestMs - 1);
@@ -190,6 +211,13 @@ describe('TR — transport', () => {
 
   it('TR-09 treats an unanswered process as pending', async () => {
     jest.useFakeTimers();
+    const pending = { status: 200, body: { ...body('status-processing'), transaction: { ...body('status-processing').transaction, status: 'pending' } } };
+    const pay = async (controller: ReturnType<typeof makeController>['controller']) => {
+      const choice = { id: 'mtn', channel: 'cm.mobile', viaAggregate: true, name: 'MTN', logo: null, label: 'MTN MoMo' };
+      await controller.payMobileMoney({ phone: '677123456', country: 'CM', choice, pickedByHand: true });
+      await settle();
+    };
+
     api = fakeApi({
       'GET /pay/session': 'session-cm-aggregate',
       'GET /pay/sdk-config': 'sdk-config-cm-stripe',
@@ -201,9 +229,7 @@ describe('TR — transport', () => {
     controller.start();
     await settle();
     controller.chooseMethod('mobile_money');
-    const choice = { id: 'mtn', channel: 'cm.mobile', viaAggregate: true, name: 'MTN', logo: null, label: 'MTN MoMo' };
-    await controller.payMobileMoney({ phone: '677123456', country: 'CM', choice, pickedByHand: true });
-    await settle();
+    await pay(controller);
 
     // Three tries, no answer: not a failure — PENDING, and the status is watched.
     expect(api.callsTo('POST /pay/process')).toHaveLength(3);
@@ -217,6 +243,44 @@ describe('TR — transport', () => {
     expect(controller.getSnapshot().state).toBe('SUCCESS');
     expect(onError).not.toHaveBeenCalled();
     controller.dismiss();
+    api.restore();
+
+    // Still `pending` a minute after the last try: it never reached the API.
+    api = fakeApi({
+      'GET /pay/session': 'session-cm-aggregate',
+      'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+      'POST /pay/process': 'network',
+      'GET /pay/status': pending,
+    });
+    const back = makeController({ onError, locale: 'en' });
+    back.controller.start();
+    await settle();
+    back.controller.chooseMethod('mobile_money');
+    onError.mockClear();
+    await pay(back.controller);
+    const key = api.callsTo('POST /pay/process')[0].headers['Idempotency-Key'];
+
+    await jest.advanceTimersByTimeAsync(55_000);
+    expect(back.controller.getSnapshot().state).toBe('PENDING');
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(back.controller.getSnapshot()).toMatchObject({
+      state: 'COLLECTING_DETAILS',
+      busy: false,
+      banner: { code: 'network_error', retryable: true, message: 'Connection error. Check your network.' },
+    });
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ code: 'network_error' }));
+    // The watch stopped.
+    const polls = api.callsTo('GET /pay/status').length;
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(api.callsTo('GET /pay/status')).toHaveLength(polls);
+
+    // The next Pay sends it again under the same key: if it had reached the API, the answer is replayed.
+    api.answer('POST /pay/process', 'process-idempotent-replay');
+    await pay(back.controller);
+    const retried = api.callsTo('POST /pay/process');
+    expect(retried[retried.length - 1].headers['Idempotency-Key']).toBe(key);
+    // And a Pay after that gets a key of its own.
+    back.controller.hostGone();
   });
 
   it('TR-10 defaults to the production api', async () => {

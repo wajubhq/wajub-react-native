@@ -7,6 +7,7 @@ import type {
   SdkConfig,
   SessionData,
   StepVerifyResponse,
+  WajubStorage,
 } from '../types';
 import { uuidV4 } from '../crypto';
 import { WajubError } from '../WajubError';
@@ -19,6 +20,7 @@ import {
   parseSession,
   parseStatus,
   parseStepVerify,
+  WajubParseError,
 } from '../wire/parse';
 import type { RawProcessBody } from '../wire/parse';
 import { acceptLanguage, clientHeader, clientSignals } from './device';
@@ -68,6 +70,8 @@ export interface RequestOptions {
   idempotencyKey?: string;
   /** Aborting it stops the request and its retries. */
   signal?: AbortSignal;
+  /** Called as each try (the first, and every automatic retry) is sent. */
+  onSend?: (at: number) => void;
 }
 
 export interface PayClientOptions {
@@ -75,6 +79,13 @@ export interface PayClientOptions {
   baseUrl?: string;
   /** @internal Waits between retries; tests pass an instant one. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * How API errors are reported. `legacy` (the default) keeps 1.4's codes and
+   * messages; `v2` maps them with the spec's catalogue (what the sheet uses).
+   */
+  errors?: 'legacy' | 'v2';
+  /** Where the device fingerprint's install id is kept. Default: AsyncStorage. */
+  storage?: WajubStorage;
 }
 
 /** Raw `/pay/*` answer, before mapping. */
@@ -86,6 +97,48 @@ interface Answer {
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+function flattenErrors(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== 'object') return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    out[key] = Array.isArray(value) && value.length > 0 ? String(value[0]) : String(value);
+  }
+  return out;
+}
+
+/** 1.4's mapping of an error answer, kept for the 1.4 methods. */
+function legacyHttpError(status: number, raw: unknown, headers: HeaderReader): WajubError {
+  const body = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const message = typeof body.message === 'string' && body.message.length > 0 ? body.message : `Request failed (${status})`;
+  const errorCode =
+    typeof body.error_code === 'string'
+      ? body.error_code
+      : status === 402
+        ? 'insufficient_funds'
+        : status === 403
+          ? 'blocked'
+          : status === 410
+            ? 'session_terminal_expired'
+            : status === 422
+              ? 'validation_error'
+              : status === 429
+                ? 'rate_limited'
+                : status === 401 || status === 404
+                  ? 'session_not_found'
+                  : status >= 500
+                    ? 'server_error'
+                    : 'payment_error';
+  const retryAfter = headers.get('Retry-After');
+  return WajubError.fromHttp(
+    status,
+    message,
+    errorCode,
+    flattenErrors(body.errors),
+    headers.get('X-Request-Id') ?? headers.get('X-Trace-Id'),
+    retryAfter ? parseInt(retryAfter, 10) : null,
+  );
+}
+
 /** A new key for each payment attempt (`^[A-Za-z0-9._:-]{1,128}$`). */
 export function newIdempotencyKey(): string {
   return uuidV4();
@@ -93,12 +146,27 @@ export function newIdempotencyKey(): string {
 
 /** `/pay/*` with the session token: headers, timeouts, retries, error mapping. */
 export class PayClient {
+  private readonly options: PayClientOptions;
   private readonly baseUrl: string;
   private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(options: PayClientOptions = {}) {
+    this.options = options;
     this.baseUrl = (options.baseUrl ?? API_URL).replace(/\/+$/, '');
     this.sleep = options.sleep ?? defaultSleep;
+  }
+
+  /** The same client with some options changed (the sheet's: `errors: 'v2'`, the host's storage). */
+  with(options: PayClientOptions): PayClient {
+    const merged: PayClientOptions = { ...this.options };
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
+    }
+    return new PayClient(merged);
+  }
+
+  private get v2(): boolean {
+    return this.options.errors === 'v2';
   }
 
   async getSession(token: string, options: RequestOptions = {}): Promise<SessionData> {
@@ -106,6 +174,8 @@ export class PayClient {
     try {
       return parseSession(answer.body);
     } catch (e) {
+      // 1.4 handed the body back as it came.
+      if (!this.v2 && e instanceof WajubParseError) return answer.body as SessionData;
       throw WajubError.create('load_error', { apiMessage: e instanceof Error ? e.message : null, httpStatus: answer.status });
     }
   }
@@ -131,7 +201,7 @@ export class PayClient {
     data: Record<string, unknown>,
     options: RequestOptions = {},
   ): Promise<RawProcessResponse> {
-    const payload = { ...data, _client: data._client ?? (await clientSignals()) };
+    const payload = { ...data, _client: data._client ?? (await clientSignals(this.options.storage)) };
     const answer = await this.send(
       token,
       { method: 'POST', path: '/pay/process', timeoutMs: TIMEOUTS.paymentRequestMs, retry: 'payment' },
@@ -246,13 +316,16 @@ export class PayClient {
           await this.sleep(this.backoff(retry));
           continue;
         }
-        throw WajubError.create(outcome.failure);
+        if (this.v2) throw WajubError.create(outcome.failure);
+        throw WajubError.network(outcome.failure === 'timeout' ? 'The request timed out.' : outcome.message);
       }
 
       const { status } = outcome;
       if (status >= 200 && status < 300) return outcome;
 
-      const error = WajubError.fromResponse({ status, body: outcome.body, headers: outcome.headers, phase: call.phase });
+      const error = this.v2
+        ? WajubError.fromResponse({ status, body: outcome.body, headers: outcome.headers, phase: call.phase })
+        : legacyHttpError(status, outcome.body, outcome.headers);
       if (retriesLeft && RETRIED_STATUSES[call.retry].includes(status)) {
         if (status !== 429) {
           await this.sleep(this.backoff(retry));
@@ -274,7 +347,7 @@ export class PayClient {
     call: Call,
     json: string | undefined,
     options: RequestOptions,
-  ): Promise<Answer | { failure: 'network_error' | 'timeout' }> {
+  ): Promise<Answer | { failure: 'network_error' | 'timeout'; message: string }> {
     const headers: Record<string, string> = {
       Accept: 'application/json',
       // AuthenticatePaymentSession reads Request::bearerToken(): the literal
@@ -295,6 +368,7 @@ export class PayClient {
     }, call.timeoutMs);
     const abort = () => controller.abort();
     options.signal?.addEventListener('abort', abort);
+    options.onSend?.(Date.now());
 
     try {
       const response = await fetch(`${this.baseUrl}${call.path}`, {
@@ -311,8 +385,8 @@ export class PayClient {
         body = {};
       }
       return { status: response.status, body, headers: response.headers };
-    } catch {
-      return { failure: timedOut ? 'timeout' : 'network_error' };
+    } catch (e) {
+      return { failure: timedOut ? 'timeout' : 'network_error', message: e instanceof Error ? e.message : 'Network error' };
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', abort);

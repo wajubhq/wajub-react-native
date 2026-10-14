@@ -101,7 +101,7 @@ function Content({ controller }: { controller: CheckoutController }) {
  */
 export function CheckoutSheet({ controller }: { controller: CheckoutController }) {
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
-  const branding = snapshot.session?.branding;
+  const branding = snapshot.session?.parsedBranding;
   const theme = useResolvedTheme(controller.options.appearance, branding);
   const context = useMemo(() => ({ theme, t: sheetStrings(snapshot.lang), lang: snapshot.lang }), [theme, snapshot.lang]);
   const { colors } = theme;

@@ -1,15 +1,23 @@
 import { PayClient } from '../client/payClient';
 import { POLLING, StatusWatcher } from '../checkout/watcher';
+import type { WatchOutcome } from '../checkout/watcher';
 import { mapStatusToResult } from '../mappers/paymentMapper';
-import type { PaymentResult, PresentOptions, SessionData } from '../types';
+import type { PaymentResult, PresentOptions, SessionData, SessionTransaction } from '../types';
+
+/** 1.4's final statuses. */
+const SUCCESS = ['success', 'successful', 'succeeded', 'paid', 'complete'];
+const ENDED = ['failed', 'cancelled', 'expired'];
 
 /**
- * Watches a payment for a host that draws its own UI: `GET /pay/status` on
- * the spec's schedule (5 s, slower after 2 minutes without a change, 15 s
- * while the socket is up, backing off on errors), next to the payment's
- * private realtime channel. `onUpdate` is called when the result changes; a
- * final result — or an ended session (`401`, `410`) — stops the watch, and so
- * does the 15-minute cap. Returns a function that stops it.
+ * Watches a payment for a host that draws its own UI, as 1.4 did: the
+ * session is read right away and then on a schedule (`intervalMs`, slower
+ * after two minutes without a change, 15 s while the realtime socket is up,
+ * backing off on errors), next to the payment's private realtime channel.
+ * `onUpdate` gets `mapStatusToResult()` of each new status; a final one
+ * stops the watch. There is no time limit: it runs until a final status, or
+ * until the returned function is called. An ended session (`401`, `403`,
+ * `404`, `410`) stops it too, with a `failed` result carrying that error —
+ * 1.4 kept polling it forever.
  */
 export function subscribeStatus(
   client: PayClient,
@@ -25,7 +33,8 @@ export function subscribeStatus(
     last = result.status;
     onUpdate(result);
   };
-  const transaction = (status: string) => ({ ...session.transaction, status });
+  // The session as last read: polls bring the whole transaction, as in 1.4.
+  let transaction: SessionTransaction = session.transaction;
 
   const watcher = new StatusWatcher({
     client,
@@ -36,16 +45,24 @@ export function subscribeStatus(
     realtime,
     lang: 'en',
     seenProcessing: false,
-    deadline: Date.now() + POLLING.overallCapMs,
+    deadline: Infinity,
+    pollImmediately: true,
     intervalMs,
-    // Finals come through onOutcome, with the spec's error codes.
-    onStatus: (status) => {
-      const result = mapStatusToResult(status.status, transaction(status.status));
-      if (result.status === 'processing') deliver(result);
+    read: async () => {
+      const fresh = await client.getSession(token);
+      transaction = fresh.transaction;
+      return { reference: fresh.transaction.id, status: fresh.transaction.status };
     },
+    decide: (status): WatchOutcome | null => {
+      const s = status.status.toLowerCase();
+      if (SUCCESS.includes(s)) return { kind: 'success' };
+      return ENDED.includes(s) ? { kind: 'ended' } : null;
+    },
+    onStatus: (status) => deliver(mapStatusToResult(status.status, { ...transaction, status: status.status })),
     onOutcome: (outcome) => {
-      if (outcome.kind === 'success') deliver({ status: 'complete', transaction: transaction('succeeded') });
-      else if (outcome.kind !== 'cap') deliver({ status: 'failed', error: outcome.error, transaction: session.transaction });
+      if (outcome.kind === 'failed' || outcome.kind === 'expired') {
+        deliver({ status: 'failed', error: outcome.cause ?? outcome.error, transaction });
+      }
     },
   });
   watcher.start();

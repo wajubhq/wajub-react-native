@@ -2,6 +2,7 @@ import type { PayClient } from '../client/payClient';
 import { subscribeStatus } from '../realtime/statusSubscriber';
 import FakePusher from '../test/pusherMock';
 import type { EchoConfig, PaymentResult, SessionData } from '../types';
+import { WajubError } from '../WajubError';
 
 // `id` is the payment's Wajub id, `reference` the merchant's own: two different
 // values on every real session, so a test that mixes them up fails.
@@ -21,12 +22,12 @@ const ECHO: EchoConfig = {
   channel_prefix: 'private-payment.',
 };
 
-/** A PayClient whose `/pay/status` answers with the given statuses, the last one for good. */
-function pollingClient(statuses: string[]): { client: PayClient; getStatus: jest.Mock; broadcastingAuth: jest.Mock } {
+/** A PayClient whose `/pay/session` answers with the given statuses, the last one for good (1.4 polls the session). */
+function pollingClient(statuses: string[]): { client: PayClient; getSession: jest.Mock; broadcastingAuth: jest.Mock } {
   let call = 0;
-  const getStatus = jest.fn(async () => ({ reference: 'pay_9f3c', status: statuses[Math.min(call++, statuses.length - 1)] }));
+  const getSession = jest.fn(async () => makeSession(ECHO, statuses[Math.min(call++, statuses.length - 1)]));
   const broadcastingAuth = jest.fn(async () => ({ auth: 'app_key:SIGNATURE' }));
-  return { client: { getStatus, broadcastingAuth } as unknown as PayClient, getStatus, broadcastingAuth };
+  return { client: { getSession, broadcastingAuth } as unknown as PayClient, getSession, broadcastingAuth };
 }
 
 // Every watch is stopped after its test, passed or failed: one left running
@@ -79,13 +80,14 @@ describe('subscribeStatus — Pusher private channel authorization', () => {
 
 describe('subscribeStatus — polling stays on next to a connected socket', () => {
   it('reports a payment the socket never announced', async () => {
-    const { client, getStatus } = pollingClient(['processing', 'succeeded']);
+    const { client, getSession } = pollingClient(['processing', 'succeeded']);
     const updates: string[] = [];
 
     watch(client, 'tok', makeSession(ECHO), (r) => updates.push(r.status));
     FakePusher.instances[0].connect();
 
-    await jest.advanceTimersByTimeAsync(5000);
+    // The first read right away, as in 1.4.
+    await jest.advanceTimersByTimeAsync(0);
     expect(updates).toEqual(['processing']);
 
     // Connected, and not one socket event: the next poll (15 s with a socket) brings the result.
@@ -94,11 +96,11 @@ describe('subscribeStatus — polling stays on next to a connected socket', () =
 
     // The final status ends the polling.
     await jest.advanceTimersByTimeAsync(60_000);
-    expect(getStatus).toHaveBeenCalledTimes(2);
+    expect(getSession).toHaveBeenCalledTimes(2);
   });
 
   it('reports each status once when the socket and the polling both see it', async () => {
-    const { client, getStatus } = pollingClient(['processing', 'processing', 'succeeded']);
+    const { client, getSession } = pollingClient(['processing', 'processing', 'succeeded']);
     const updates: string[] = [];
 
     watch(client, 'tok', makeSession(ECHO), (r) => updates.push(r.status));
@@ -111,22 +113,47 @@ describe('subscribeStatus — polling stays on next to a connected socket', () =
     expect(updates).toEqual(['processing', 'complete']);
 
     // The socket got there first: the polling stops and adds nothing.
-    const polls = getStatus.mock.calls.length;
+    const polls = getSession.mock.calls.length;
     await jest.advanceTimersByTimeAsync(60_000);
-    expect(getStatus).toHaveBeenCalledTimes(polls);
+    expect(getSession).toHaveBeenCalledTimes(polls);
     expect(updates).toEqual(['processing', 'complete']);
   });
 
   it('stops polling when the app stops watching', async () => {
-    const { client, getStatus } = pollingClient(['processing']);
+    const { client, getSession } = pollingClient(['processing']);
 
     const unsub = watch(client, 'tok', makeSession(ECHO));
     await jest.advanceTimersByTimeAsync(5000);
-    const polls = getStatus.mock.calls.length;
+    const polls = getSession.mock.calls.length;
     expect(polls).toBeGreaterThan(0);
 
     unsub();
     await jest.advanceTimersByTimeAsync(60_000);
-    expect(getStatus).toHaveBeenCalledTimes(polls);
+    expect(getSession).toHaveBeenCalledTimes(polls);
+  });
+
+  it("keeps 1.4's results, and watches past 15 minutes until a final status", async () => {
+    const { client, getSession } = pollingClient(['processing']);
+    const updates: string[] = [];
+    watch(client, 'tok', makeSession({ ...ECHO, key: '' }), (r) => updates.push(r.status));
+    await jest.advanceTimersByTimeAsync(20 * 60_000);
+    // No silent stop at the spec's 15-minute cap: 1.4 watched until told otherwise.
+    const polls = getSession.mock.calls.length;
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(getSession.mock.calls.length).toBeGreaterThan(polls);
+
+    getSession.mockImplementation(async () => makeSession(ECHO, 'failed'));
+    await jest.advanceTimersByTimeAsync(15_000);
+    expect(updates).toEqual(['processing', 'failed']);
+  });
+
+  it('stops on an ended session with the 1.4 error', async () => {
+    const { client, getSession } = pollingClient(['processing']);
+    const results: PaymentResult[] = [];
+    getSession.mockRejectedValue(WajubError.fromHttp(410, 'Expired', 'session_terminal_expired', {}));
+    watch(client, 'tok', makeSession({ ...ECHO, key: '' }), (r) => results.push(r));
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(results).toMatchObject([{ status: 'failed', error: { code: 'session_terminal_expired', type: 'authentication_error' } }]);
+    expect(getSession).toHaveBeenCalledTimes(1);
   });
 });

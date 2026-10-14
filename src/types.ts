@@ -8,18 +8,17 @@ export const API_URL = 'https://api.wajub.com';
 /**
  * `paystack_inline` / `flutterwave_inline` are legacy values the API no
  * longer sends — Paystack/Flutterwave cards go through `client_session`.
- * `adyen_custom_card` and `psp_inline` without `client_session` need a web
- * component this SDK doesn't embed: card is hidden. Unknown values: hidden.
+ * `adyen_custom_card` needs Adyen's own client-side encryption, which this
+ * SDK doesn't embed: treated as unavailable. The API may send other values
+ * (`psp_inline`…): the sheet hides a card it cannot draw.
  */
 export type SdkFlavor =
   | 'form'
   | 'stripe_elements'
   | 'hosted_redirect'
   | 'adyen_custom_card'
-  | 'psp_inline'
   | 'paystack_inline'
-  | 'flutterwave_inline'
-  | (string & {});
+  | 'flutterwave_inline';
 
 export interface SdkChannelConfig {
   available: boolean;
@@ -307,7 +306,10 @@ export interface SessionData {
   channels: SessionChannel[];
   /** "fr" | "en"; absent when the payment has none. */
   locale?: string;
-  branding?: Branding;
+  /** The merchant's branding as the API sent it (some values are numbers or booleans). Typed: `parsedBranding`. */
+  branding?: Record<string, string | null>;
+  /** `branding`, read with its types (white label, weights, overlay…). */
+  parsedBranding?: Branding;
   /** Absent when broadcasting is off. */
   echo?: EchoConfig;
   altcha?: AltchaChallenge | null;
@@ -376,70 +378,90 @@ export interface WajubErrorShape {
   retryable: boolean;
   /** The field at fault, e.g. "data.phone". */
   param?: string | null;
-  http_status?: number | null;
-  /** The response's X-Request-Id. */
   correlation_id?: string | null;
   /** 429. */
   retry_after_seconds?: number | null;
   /** The API's `errors`, first message per key. */
-  details?: Record<string, string> | null;
+  details?: Record<string, string>;
+  http_status?: number | null;
   /** 403 `shield_blocked`. */
   block_reference?: string | null;
   /** The API's own (English) message, for logs. */
   api_message?: string | null;
 }
 
-/**
- * What one `/pay/process` (or client-session) answer asks for. `push_approval`
- * is a Mobile Money push waiting on the phone; `confirm_otp` … `confirm_address`
- * carry `stepId` and `hint` for `WajubSession.verifyOtp()` and friends.
- */
-export type ActionKind =
-  | 'redirect'
-  | 'confirm'
-  | 'confirm_3ds'
-  | 'push_approval'
-  | 'client_session'
-  | 'confirm_otp'
-  | 'confirm_pin'
-  | 'confirm_phone'
-  | 'confirm_birthday'
-  | 'confirm_address';
+/** The spec's plain error shape (errors.md §1): `WajubError.toJSON()`. */
+export interface WajubErrorJSON {
+  name: 'WajubError';
+  type: WajubErrorType;
+  code: string;
+  message: string;
+  decline_code: string | null;
+  retryable: boolean;
+  param: string | null;
+  http_status: number | null;
+  correlation_id: string | null;
+  retry_after_seconds: number | null;
+  details: Record<string, string> | null;
+  block_reference: string | null;
+  api_message: string | null;
+}
 
+export type ActionKind = 'redirect' | 'confirm' | 'confirm_3ds' | 'push_approval' | 'client_session';
+
+/** One `/pay/process` answer, as `mapProcessResponse()` and the 1.4 `WajubSession` methods read it. */
 export type PaymentResult =
   | { status: 'complete'; transaction: SessionTransaction }
-  | {
-      status: 'processing';
-      transaction: SessionTransaction;
-      instruction?: string | null;
-      /** `ussd`: the payer dials the code in `instruction`; `pending`: nothing to do but wait. */
-      kind?: 'ussd' | 'pending';
-    }
+  | { status: 'processing'; transaction: SessionTransaction; instruction?: string | null }
   | {
       status: 'requires_action';
       action: ActionKind;
-      /** `confirm_url`, or `client_session.hosted_url`. */
       action_url?: string | null;
       /** Set when `action` is `client_session`; `action_url` is then its `hosted_url`. */
       client_session?: ClientSession | null;
-      /** `otp_id` / `pin_id` / `phone_id` / `birthday_id` / `address_id` / `three_ds_id`. */
-      stepId?: string | null;
-      /** `otp_masked_contact` / `*_instruction` / `masked_email`. */
-      hint?: string | null;
       transaction: SessionTransaction;
     }
   | { status: 'failed'; error: WajubErrorShape; transaction: SessionTransaction | null };
 
-/** Spec v2's name for one `/pay/process` answer: this SDK's `PaymentResult`. */
-export type ProcessOutcome = PaymentResult;
+/** The `action` of a `/pay/process` answer (spec v2): any value the API may send. */
+export type ProcessAction =
+  | 'redirect'
+  | 'confirm'
+  | 'confirm_3ds'
+  | 'confirm_otp'
+  | 'confirm_pin'
+  | 'confirm_phone'
+  | 'confirm_birthday'
+  | 'confirm_address'
+  | 'client_session'
+  | (string & {});
+
+/**
+ * One `/pay/process` (or client-session) answer, spec v2's way
+ * (`WajubSession.submit()`): the confirmation steps carry their `stepId` and
+ * `hint`; an action the SDK cannot perform is `failed` / `unsupported_action`.
+ */
+export type ProcessOutcome =
+  | { status: 'complete'; transaction: SessionTransaction }
+  | { status: 'processing'; transaction: SessionTransaction | null; instruction: string | null; kind: 'approval' | 'ussd' | 'pending' }
+  | {
+      status: 'requires_action';
+      action: ProcessAction;
+      /** `confirm_url`, or `client_session.hosted_url`. */
+      url: string | null;
+      /** `otp_id` / `pin_id` / `phone_id` / `birthday_id` / `address_id` / `three_ds_id`. */
+      stepId: string | null;
+      /** `otp_masked_contact` / `*_instruction` / `masked_email`. */
+      hint: string | null;
+      clientSession: ClientSession | null;
+      transaction: SessionTransaction | null;
+    }
+  | { status: 'failed'; error: WajubErrorShape; transaction: SessionTransaction | null };
 
 export interface MobileMoneyInput {
   channel_slug: string;
-  /** Any input: the SDK sends it in E.164. */
   phone: string;
   country: string;
-  /** Aggregates only (`cm.mobile`): the operator the payer named, e.g. "mtn". */
-  operator?: string | null;
 }
 
 /** @deprecated `present()` resolves a `CheckoutResult`. */
@@ -491,10 +513,11 @@ export interface PaymentSuccess {
 
 export type CancelReason = 'payer_cancelled' | 'dismissed' | 'host_gone';
 
-/** What `present()` resolves with, exactly once. */
+/** How the sheet closed (states.md §4): what `onComplete` gets and `present()` resolves with. */
 export type CheckoutResult =
   | { status: 'complete'; payment: PaymentSuccess; transaction: SessionTransaction }
-  | { status: 'processing'; transaction: SessionTransaction | null }
+  /** An attempt started (so the payment is known) and has no outcome yet. */
+  | { status: 'processing'; transaction: SessionTransaction; instruction?: string | null }
   | { status: 'failed'; error: WajubErrorShape; transaction: SessionTransaction | null }
   | {
       status: 'cancelled';
@@ -503,6 +526,21 @@ export type CheckoutResult =
       /** @deprecated Kept for code written against 1.4: test `status === 'cancelled'`. */
       cancelled: true;
     };
+
+/**
+ * @deprecated Never produced since 1.5: approvals, steps and provider pages
+ * happen in the sheet. Kept in `present()`'s type so 1.4 code still compiles.
+ */
+export type DeprecatedRequiresAction = Extract<PaymentResult, { status: 'requires_action' }>;
+
+/** What `present()` resolves with: a `CheckoutResult` (1.4's `requires_action` never comes). */
+export type PresentResult = CheckoutResult | DeprecatedRequiresAction;
+
+/** Key-value storage that outlives the app, as `@react-native-async-storage/async-storage` offers. */
+export interface WajubStorage {
+  getItem(key: string): Promise<string | null>;
+  setItem(key: string, value: string): Promise<void>;
+}
 
 export interface ReadyEvent {
   sessionId: string;
@@ -656,4 +694,11 @@ export interface PresentOptions extends CheckoutCallbacks {
   cancelOnDismiss?: boolean;
   /** ms before the success screen closes itself; 0 keeps it. Default 3000. */
   autoCloseSuccess?: number;
+  /** Where the per-install id behind the device fingerprint is kept. Default: AsyncStorage. */
+  storage?: WajubStorage;
+  /**
+   * Stripe cards: the sheet initialises `@stripe/stripe-react-native` with the
+   * payment's publishable key; give your own here to have it put back after.
+   */
+  stripe?: { appPublishableKey?: string };
 }

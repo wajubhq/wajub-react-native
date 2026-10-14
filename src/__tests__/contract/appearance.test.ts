@@ -4,7 +4,7 @@ import { body } from '../../test/fakeApi';
 import type { Appearance } from '../../types';
 import { parseSession } from '../../wire/parse';
 
-const branding = parseSession(body('session-cm-aggregate')).branding!;
+const branding = parseSession(body('session-cm-aggregate')).parsedBranding!;
 
 describe('AP — appearance', () => {
   it('AP-01 parses the appearance object', () => {
@@ -98,7 +98,7 @@ describe('AP — appearance', () => {
   });
 
   it('AP-04 uses the default palettes', () => {
-    const wallets = parseSession(body('session-ci-xof-wallets')).branding;
+    const wallets = parseSession(body('session-ci-xof-wallets')).parsedBranding;
     expect(resolveTheme({ branding: wallets, systemScheme: 'light' }).colors).toEqual(SPEC_PALETTES.light);
     expect(resolveTheme({ branding: wallets, systemScheme: 'dark' }).colors).toEqual(SPEC_PALETTES.dark);
     expect(DEFAULT_PALETTES).toEqual(SPEC_PALETTES);

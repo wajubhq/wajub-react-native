@@ -46,9 +46,16 @@ export interface StripeCardSectionProps {
   payLabel?: string;
   /**
    * The payment's Stripe key (sdk-config `publishable_key`): only the account
-   * that issues a `pm_…` can charge it. When given, Stripe is initialised with it.
+   * that issues a `pm_…` can charge it. When given, Stripe is initialised with
+   * it while this section shows.
    */
   publishableKey?: string | null;
+  /** The app's own Stripe key: put back when this section goes away. */
+  appPublishableKey?: string | null;
+  /** Pay pressed: called before Stripe creates the PaymentMethod. */
+  onBegin?: () => void;
+  /** Stripe could not create the PaymentMethod (its message shows above the field). */
+  onFail?: () => void;
 }
 
 /**
@@ -64,6 +71,9 @@ export function StripeCardSection({
   locale,
   payLabel,
   publishableKey,
+  appPublishableKey,
+  onBegin,
+  onFail,
 }: StripeCardSectionProps) {
   const t = sheetStrings(locale);
   const { theme } = useSheet();
@@ -76,9 +86,18 @@ export function StripeCardSection({
   const [localError, setLocalError] = useState<string | null>(null);
   const initStripe = stripeModule.initStripe;
 
+  // Stripe has one configuration per app: the payment's key while this
+  // shows, the app's back afterwards when the app said which it is.
   useEffect(() => {
-    if (publishableKey && initStripe) void initStripe({ publishableKey }).catch(() => undefined);
-  }, [publishableKey, initStripe]);
+    if (!publishableKey || !initStripe || publishableKey === appPublishableKey) return;
+    void initStripe({ publishableKey }).catch(() => undefined);
+    return () => {
+      if (appPublishableKey) void initStripe({ publishableKey: appPublishableKey }).catch(() => undefined);
+      else if ((globalThis as { __DEV__?: boolean }).__DEV__) {
+        console.warn("[wajub] Stripe stays initialised with this payment's publishable key. Pass present({ stripe: { appPublishableKey } }) to have yours put back.");
+      }
+    };
+  }, [publishableKey, appPublishableKey, initStripe]);
 
   const pay = async () => {
     if (!createPaymentMethod) {
@@ -86,8 +105,10 @@ export function StripeCardSection({
       return;
     }
     setLocalError(null);
+    onBegin?.();
+    let paymentMethodId: string;
     try {
-      const paymentMethodId = await createStripePaymentMethod(async () => {
+      paymentMethodId = await createStripePaymentMethod(async () => {
         const { paymentMethod, error: stripeError } = await createPaymentMethod({
           paymentMethodType: 'Card',
           paymentMethodData: {
@@ -101,6 +122,12 @@ export function StripeCardSection({
           error: stripeError ? { message: stripeError.message } : null,
         };
       });
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : t.cardPaymentFailed);
+      onFail?.();
+      return;
+    }
+    try {
       await onPay(paymentMethodId);
     } catch (e) {
       setLocalError(e instanceof Error ? e.message : t.cardPaymentFailed);

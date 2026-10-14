@@ -137,6 +137,14 @@ describe('WT — watching', () => {
     }
     expect(decideStatus({ reference: 'x', status: 'pending' }, true, 'fr')).toMatchObject({ kind: 'failed', error: { code: 'payment_attempt_ended', retryable: true } });
 
+    // An empty answer says nothing: never read as `pending`, never a refusal — the watch goes on.
+    const empty = client(() => parseStatus({}));
+    const watchedEmpty = watch(empty.client, { seenProcessing: true });
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(watchedEmpty.outcomes).toEqual([]);
+    expect(empty.getStatus.mock.calls.length).toBeGreaterThanOrEqual(5);
+    watchedEmpty.watcher.stop();
+
     // The watcher itself: pending seen first is ignored, then processing, then pending ends it.
     const sequence = ['status-pending-attempt-refused', 'status-processing', 'status-pending-attempt-refused'].map(status);
     const flow = client(() => sequence.shift() ?? processing);
@@ -230,7 +238,11 @@ describe('WT — watching', () => {
     const f = fixture('realtime-payment-status-updated-processing');
     const c = client(() => processing);
     const { outcomes } = watch(c.client, { echo: ECHO, transactionId: f.channel!.replace('private-payment.', '') });
-    FakePusher.instances[FakePusher.instances.length - 1].emit(f.channel!, f.event!, JSON.stringify(f.data));
+    const socket = FakePusher.instances[FakePusher.instances.length - 1];
+    socket.emit(f.channel!, f.event!, JSON.stringify(f.data));
+    // A frame without a status (or not JSON) is no information, even after the attempt was seen processing.
+    socket.emit(f.channel!, f.event!, { status_label: 'Pending', reference: 'trx_x' });
+    socket.emit(f.channel!, f.event!, 'not json');
     expect(outcomes).toEqual([]);
   });
 

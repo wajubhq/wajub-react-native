@@ -57,7 +57,10 @@ describe('PR — parsing', () => {
     injected.channels[0].future_key = [1, 2];
     injected.channels[1].operators[0].future_key = null;
 
-    expect(parseSession(injected)).toEqual(parseSession(raw));
+    // `branding` itself is the API's object, as 1.4 handed it over; its reading is `parsedBranding`.
+    const withoutRaw = (body: unknown) => ({ ...parseSession(body), branding: undefined });
+    expect(withoutRaw(injected)).toEqual(withoutRaw(raw));
+    expect(parseSession(raw).branding).toEqual(raw.branding);
   });
 
   it('PR-03 accepts numbers as int, double or numeric string', () => {
@@ -90,7 +93,7 @@ describe('PR — parsing', () => {
   });
 
   it('PR-04 accepts booleans in every encoding', () => {
-    expect(parseSession(body('session-cm-aggregate')).branding?.white_label).toBe(true);
+    expect(parseSession(body('session-cm-aggregate')).parsedBranding?.white_label).toBe(true);
     for (const [value, expected] of [
       [true, true],
       [1, true],
@@ -103,7 +106,7 @@ describe('PR — parsing', () => {
       raw.branding.white_label = value;
       raw.transaction.sandbox = value;
       const session = parseSession(raw);
-      expect(session.branding?.white_label).toBe(expected);
+      expect(session.parsedBranding?.white_label).toBe(expected);
       expect(session.transaction.sandbox).toBe(expected);
     }
     const config = body('sdk-config-cm-stripe');
@@ -113,17 +116,17 @@ describe('PR — parsing', () => {
   });
 
   it('PR-05 parses branding with mixed types', () => {
-    const branding = parseSession(body('session-cm-aggregate')).branding!;
+    const branding = parseSession(body('session-cm-aggregate')).parsedBranding!;
     expect(branding.white_label).toBe(true);
     expect(branding.overlay_intensity).toBe(40);
     expect(branding.font_weight_heading).toBe(600);
     expect(branding.font_weight_body).toBe(400);
     expect(branding.primary_color).toBe('#0F766E');
-    expect(parseSession(body('session-ci-xof-wallets')).branding?.business_name).toBe('Maquis Plateau');
+    expect(parseSession(body('session-ci-xof-wallets')).parsedBranding?.business_name).toBe('Maquis Plateau');
 
     const object = body('session-cm-aggregate');
     object.branding.white_label = { enabled: true, brand_name: 'Akwa Pay' };
-    expect(parseSession(object).branding?.white_label).toMatchObject({ enabled: true, brand_name: 'Akwa Pay' });
+    expect(parseSession(object).parsedBranding?.white_label).toMatchObject({ enabled: true, brand_name: 'Akwa Pay' });
 
     for (const branding of [{}, undefined, null]) {
       const raw = body('session-cm-aggregate');
@@ -135,8 +138,8 @@ describe('PR — parsing', () => {
   it('PR-06 reads dotted keys literally', () => {
     const session = parseSession(body('session-cm-aggregate'));
     expect(session.channels[0]['name.fr']).toBe('Carte bancaire');
-    expect(session.branding?.['card.background_color']).toBe('#FFFFFF');
-    expect(session.branding?.['card.border_color']).toBe('#E5E7EB');
+    expect(session.parsedBranding?.['card.background_color']).toBe('#FFFFFF');
+    expect(session.parsedBranding?.['card.border_color']).toBe('#E5E7EB');
     expect(parseSession(body('session-sandbox-cm')).channels[2]).toMatchObject({ name: 'Card', 'name.fr': 'Carte bancaire' });
   });
 

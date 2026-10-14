@@ -6,6 +6,8 @@
  * @type {import('jest').Config}
  */
 module.exports = {
+  // Generous on a loaded machine or a cold transform cache (CI).
+  testTimeout: 30_000,
   projects: [
     {
       displayName: 'unit',
@@ -17,6 +19,8 @@ module.exports = {
         '^react-native$': '<rootDir>/src/test/reactNativeMock.ts',
         '^@stripe/stripe-react-native$': '<rootDir>/src/test/stripeReactNativeMock.ts',
         '^pusher-js$': '<rootDir>/src/test/pusherMock.ts',
+        // The package's own in-memory mock.
+        '^@react-native-async-storage/async-storage$': '@react-native-async-storage/async-storage/jest/async-storage-mock',
       },
     },
     {
@@ -27,6 +31,8 @@ module.exports = {
       moduleNameMapper: {
         '^@stripe/stripe-react-native$': '<rootDir>/src/test/stripeReactNativeMock.ts',
         '^pusher-js$': '<rootDir>/src/test/pusherMock.ts',
+        // The package's own in-memory mock.
+        '^@react-native-async-storage/async-storage$': '@react-native-async-storage/async-storage/jest/async-storage-mock',
       },
     },
   ],

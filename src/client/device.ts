@@ -1,6 +1,7 @@
 import { Dimensions, I18nManager, NativeModules, PixelRatio, Platform } from 'react-native';
 
 import { sha256Hex, uuidV4 } from '../crypto';
+import type { WajubStorage } from '../types';
 import { SDK_VERSION } from '../version';
 
 /** `data._client` on POST /pay/process (spec README §2.3). */
@@ -61,23 +62,17 @@ export function acceptLanguage(locales: string[] = deviceLocales()): string {
   return tags.map((tag, i) => (i === 0 ? tag : `${tag};q=${Math.max(0.1, 1 - i / 10).toFixed(1)}`)).join(', ');
 }
 
-/** Key-value storage that outlives the app process. */
-export interface InstallStore {
-  getItem(key: string): Promise<string | null>;
-  setItem(key: string, value: string): Promise<void>;
-}
-
 const INSTALL_ID_KEY = '@wajub/install-id';
 
 /**
- * `@react-native-async-storage/async-storage` when the app has it — an
- * optional peer, required inside try/catch so Metro treats it as optional.
- * Without it the install id lives as long as the JS runtime.
+ * `@react-native-async-storage/async-storage` (a peer dependency), required
+ * inside try/catch: a missing or unlinked native module never crashes the
+ * payment. Without it the install id lives as long as the JS runtime.
  */
-function persistentStore(): InstallStore | null {
+function asyncStorage(): WajubStorage | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const module = require('@react-native-async-storage/async-storage') as { default?: InstallStore } & InstallStore;
+    const module = require('@react-native-async-storage/async-storage') as { default?: WajubStorage } & WajubStorage;
     const store = module.default ?? module;
     if (typeof store.getItem === 'function') return store;
   } catch {
@@ -91,40 +86,48 @@ function persistentStore(): InstallStore | null {
   return null;
 }
 
-let fingerprintPromise: Promise<string> | null = null;
+let defaultFingerprint: Promise<string> | null = null;
+const hostFingerprints = new WeakMap<WajubStorage, Promise<string>>();
 
 /**
  * Hex SHA-256 of "device:" + a UUID v4 generated once and kept in the app's
  * storage — never a hardware or advertising id. A new fingerprint for a known
  * phone number reads as a SIM swap to Wajub's risk engine: it survives app
- * updates and restarts.
+ * updates and restarts. `storage`: the host's own; else AsyncStorage.
  */
-export function installFingerprint(): Promise<string> {
-  if (!fingerprintPromise) {
-    fingerprintPromise = (async () => {
-      const store = persistentStore();
-      let id: string | null = null;
-      try {
-        id = (await store?.getItem(INSTALL_ID_KEY)) ?? null;
-      } catch {
-        id = null;
-      }
-      if (!id) {
-        id = uuidV4();
-        try {
-          await store?.setItem(INSTALL_ID_KEY, id);
-        } catch {
-          /* kept in memory for this run */
-        }
-      }
-      return sha256Hex(`device:${id}`);
-    })();
+export function installFingerprint(storage?: WajubStorage): Promise<string> {
+  if (storage) {
+    let promise = hostFingerprints.get(storage);
+    if (!promise) {
+      promise = readFingerprint(storage);
+      hostFingerprints.set(storage, promise);
+    }
+    return promise;
   }
-  return fingerprintPromise;
+  if (!defaultFingerprint) defaultFingerprint = readFingerprint(asyncStorage());
+  return defaultFingerprint;
+}
+
+async function readFingerprint(store: WajubStorage | null): Promise<string> {
+  let id: string | null = null;
+  try {
+    id = (await store?.getItem(INSTALL_ID_KEY)) ?? null;
+  } catch {
+    id = null;
+  }
+  if (!id) {
+    id = uuidV4();
+    try {
+      await store?.setItem(INSTALL_ID_KEY, id);
+    } catch {
+      /* kept in memory for this run */
+    }
+  }
+  return sha256Hex(`device:${id}`);
 }
 
 /** The device signals sent as `data._client` with every payment attempt. */
-export async function clientSignals(): Promise<ClientSignals> {
+export async function clientSignals(storage?: WajubStorage): Promise<ClientSignals> {
   let timezone = 'UTC';
   try {
     timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || timezone;
@@ -139,7 +142,7 @@ export async function clientSignals(): Promise<ClientSignals> {
     language: deviceLocales()[0],
     screen: `${sides[0]}x${sides[1]}`,
     color_depth: 24,
-    fingerprint: await installFingerprint(),
+    fingerprint: await installFingerprint(storage),
     client: clientHeader(),
   };
 }

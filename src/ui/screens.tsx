@@ -98,11 +98,14 @@ export function CardForm({ controller, snapshot, method }: Props & { method: Ext
         cardholderName={cardholder}
         onCardholderNameChange={setCardholder}
         onPay={(id) => controller.payStripe(id, cardholder)}
+        onBegin={() => controller.beginCardPayment()}
+        onFail={() => controller.cardPaymentFailed()}
         submitting={snapshot.busy}
         error={snapshot.banner?.message ?? null}
         locale={lang}
         payLabel={payLabel}
         publishableKey={method.publishableKey}
+        appPublishableKey={controller.options.stripe?.appPublishableKey}
       />
     );
   }
@@ -291,7 +294,7 @@ export function PendingView({ controller, snapshot, url, capped }: Props & { url
 
 export function SuccessView({ controller, snapshot, payment }: Props & { payment: PaymentSuccess }) {
   const { theme, t, lang } = useSheet();
-  const merchant = snapshot.session?.branding?.business_name;
+  const merchant = snapshot.session?.parsedBranding?.business_name;
   return (
     <View style={{ gap: theme.gapRow }} testID="wajub-success">
       <StatusMark tone="success" glyph="✓" />

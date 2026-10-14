@@ -4,12 +4,14 @@ export { SDK_VERSION } from './version';
 export { WajubError } from './WajubError';
 export { PayClient } from './client/payClient';
 export { createSession, WajubSession } from './WajubSession';
+export type { WajubSessionOptions } from './WajubSession';
 export {
   buildHostedCardRequest,
   buildMobileMoneyRequest,
   hostedCardFieldError,
   isHostedCardField,
   isRedirectWalletChannel,
+  mapProcessOutcome,
   mapProcessResponse,
   mapStatusToResult,
 } from './mappers/paymentMapper';

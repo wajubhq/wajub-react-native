@@ -1,7 +1,7 @@
 import { catalogueMessage, ERROR_CATALOGUE, GENERIC_DECLINE, isCatalogued } from './errorCatalogue';
 import type { Lang } from './errorCatalogue';
 import { parseApiError } from './wire/parse';
-import type { WajubErrorShape, WajubErrorType } from './types';
+import type { WajubErrorJSON, WajubErrorShape, WajubErrorType } from './types';
 
 /** What a message is rebuilt from when the error is shown in another language. */
 interface ErrorContext {
@@ -68,7 +68,7 @@ export class WajubError extends Error implements WajubErrorShape {
   readonly http_status: number | null;
   readonly correlation_id: string | null;
   readonly retry_after_seconds: number | null;
-  readonly details: Record<string, string> | null;
+  readonly details?: Record<string, string>;
   readonly block_reference: string | null;
   readonly api_message: string | null;
 
@@ -82,14 +82,14 @@ export class WajubError extends Error implements WajubErrorShape {
     this.http_status = shape.http_status ?? null;
     this.correlation_id = shape.correlation_id ?? null;
     this.retry_after_seconds = shape.retry_after_seconds ?? null;
-    this.details = shape.details ?? null;
+    this.details = shape.details ?? undefined;
     this.block_reference = shape.block_reference ?? null;
     this.api_message = shape.api_message ?? null;
     Object.defineProperty(this, 'context', { value: context ?? null, enumerable: false });
   }
 
   /** The spec's plain shape (errors.md §1). */
-  toJSON(): Required<WajubErrorShape> {
+  toJSON(): WajubErrorJSON {
     return {
       name: 'WajubError',
       type: this.type,
@@ -101,17 +101,22 @@ export class WajubError extends Error implements WajubErrorShape {
       http_status: this.http_status,
       correlation_id: this.correlation_id,
       retry_after_seconds: this.retry_after_seconds,
-      details: this.details,
+      details: this.details ?? null,
       block_reference: this.block_reference,
       api_message: this.api_message,
     };
+  }
+
+  /** Its fields as a `WajubErrorShape`. */
+  private shape(): WajubErrorShape {
+    return { ...this.toJSON(), details: this.details };
   }
 
   /** The same error with its message in `lang` (an error built from a bare shape keeps its own). */
   localized(lang: Lang): WajubError {
     const context = (this as unknown as { context: ErrorContext | null }).context;
     if (!context) return this;
-    return new WajubError({ ...this.toJSON(), message: messageFor(this.code, lang, context) }, context);
+    return new WajubError({ ...this.shape(), message: messageFor(this.code, lang, context) }, context);
   }
 
   /** An error of the catalogue (errors.md §3), with its type, retryability and message. */
@@ -160,7 +165,7 @@ export class WajubError extends Error implements WajubErrorShape {
     if (status === 410) code = 'session_terminal_expired';
     const entry = isCatalogued(code) ? ERROR_CATALOGUE[code] : undefined;
     const keys = Object.keys(body.errors);
-    const details = keys.length > 0 ? Object.fromEntries(keys.map((k) => [k, body.errors[k][0] ?? ''])) : null;
+    const details = keys.length > 0 ? Object.fromEntries(keys.map((k) => [k, body.errors[k][0] ?? ''])) : undefined;
     const retryAfter = body.retry_after ?? retryAfterHeader(headers);
     const context: ErrorContext = {
       status,
@@ -216,7 +221,7 @@ export class WajubError extends Error implements WajubErrorShape {
   /** A request that got no answer (no connection, DNS, TLS, reset). */
   static network(message?: string): WajubError {
     const error = WajubError.create('network_error', { apiMessage: message ?? null });
-    return message ? new WajubError({ ...error.toJSON(), message }, { apiMessage: message }) : error;
+    return message ? new WajubError({ ...error.toJSON(), details: undefined, message }, { apiMessage: message }) : error;
   }
 
   /**

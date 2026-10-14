@@ -60,6 +60,54 @@ describe('LD — loading', () => {
     await settle();
     expect(late.controller.getSnapshot().methods.map((m) => m.id)).toEqual(['card', 'mobile_money']);
     late.controller.hostGone();
+    api.restore();
+
+    // Card only, or wallets only: they need sdk-config — the sheet waits for it, never a lasting no_payment_method.
+    const cardOnly = body('session-cm-aggregate');
+    cardOnly.channels = [cardOnly.channels[0]];
+    const walletOnly = body('session-ci-xof-wallets');
+    walletOnly.channels = [walletOnly.channels[0]];
+    for (const [session, config, method] of [
+      [cardOnly, 'sdk-config-cm-stripe', 'card'],
+      [walletOnly, 'sdk-config-ci-wallets', 'ci.djamo'],
+    ] as const) {
+      let configArrives!: () => void;
+      const slowConfig = new Promise<void>((resolve) => (configArrives = resolve));
+      api = fakeApi({ 'GET /pay/session': { status: 200, body: session } });
+      api.fetch.mockImplementation(async (url: string) => {
+        if (url.endsWith('/pay/sdk-config')) await slowConfig;
+        const answer = url.endsWith('/pay/sdk-config') ? body(config) : session;
+        return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(answer) };
+      });
+      const onLoadError = jest.fn();
+      const waiting = makeController({ readyTimeout: 15_000, onLoadError });
+      waiting.controller.start();
+      await jest.advanceTimersByTimeAsync(10_000);
+      expect(waiting.controller.getSnapshot().screen.name).toBe('loading');
+      // Past the ready timer: the retryable timeout, not "no payment method".
+      await jest.advanceTimersByTimeAsync(5_000);
+      expect(onLoadError).toHaveBeenCalledWith(expect.objectContaining({ code: 'ready_timeout' }));
+      configArrives();
+      await settle();
+      expect(waiting.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', screen: { name: 'form', method: { id: method } } });
+      expect(onLoadError).toHaveBeenCalledTimes(1);
+      waiting.controller.hostGone();
+      api.restore();
+
+      // sdk-config fails for good (after its retries): a load error with Retry, which reloads.
+      api = fakeApi({ 'GET /pay/session': { status: 200, body: session }, 'GET /pay/sdk-config': { status: 503 } });
+      const failing = makeController({ onLoadError });
+      failing.controller.start();
+      await settle();
+      expect(failing.controller.getSnapshot().screen).toMatchObject({ name: 'load_error', error: { code: 'load_error', retryable: true } });
+      expect(failing.controller.getSnapshot().methods).toEqual([]);
+      api.answer('GET /pay/sdk-config', config);
+      failing.controller.retryLoad();
+      await settle();
+      expect(failing.controller.getSnapshot().screen).toMatchObject({ name: 'form', method: { id: method } });
+      failing.controller.hostGone();
+      api.restore();
+    }
   });
 
   it('LD-02 maps unknown sessions to session_not_found', async () => {
@@ -239,5 +287,17 @@ describe('CH — channels', () => {
     const list = availableMethods(parseSession(raw), parseSdkConfig(body('sdk-config-cm-stripe')), 'en', true);
     expect(list.find((m) => m.kind === 'mobile_money')?.limit).toEqual({ min: 50_000 });
     expect(list.find((m) => m.kind === 'card')?.limit).toEqual({ max: 1_000 });
+  });
+
+  it('CH-05 does not open an only method that is out of its limits', async () => {
+    const raw = body('session-cm-aggregate');
+    raw.channels = [{ ...raw.channels[1], min_amount: 50_000 }];
+    const { controller } = await load({ status: 200, body: raw });
+    // The list, with Mobile Money disabled and its limit — not a form that cannot pay.
+    expect(controller.getSnapshot()).toMatchObject({ state: 'INITIATED', screen: { name: 'methods' } });
+    expect(controller.getSnapshot().methods[0].limit).toEqual({ min: 50_000 });
+    controller.chooseMethod('mobile_money');
+    expect(controller.getSnapshot().screen.name).toBe('methods');
+    controller.hostGone();
   });
 });

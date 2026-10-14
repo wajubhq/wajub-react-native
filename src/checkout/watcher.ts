@@ -26,14 +26,16 @@ export const POLLING = {
 
 export const SUCCESS_STATUSES = ['succeeded', 'refunded', 'partially_refunded'];
 
-/** How a watch ended. */
+/** How a watch ended. `cause`: the request error behind it (an ended session). */
 export type WatchOutcome =
   | { kind: 'success' }
-  | { kind: 'failed'; error: WajubError }
+  | { kind: 'failed'; error: WajubError; cause?: WajubError }
   | { kind: 'cancelled'; error: WajubError }
-  | { kind: 'expired'; error: WajubError }
+  | { kind: 'expired'; error: WajubError; cause?: WajubError }
   /** 15 minutes, or the payment's `expires_at`, without an outcome. */
-  | { kind: 'cap' };
+  | { kind: 'cap' }
+  /** A final status a custom `decide()` stops on (it reported it through `onStatus`). */
+  | { kind: 'ended' };
 
 /** A payment back at `pending` after this attempt was seen processing: refused, nothing charged. */
 function attemptEnded(status: PaymentStatus, lang: Lang): WajubError {
@@ -43,7 +45,7 @@ function attemptEnded(status: PaymentStatus, lang: Lang): WajubError {
     body: { error_code: status.error_code, message: status.payer_message ?? undefined, payer_message: status.payer_message ?? undefined },
     lang,
   });
-  return new WajubError({ ...declined.toJSON(), http_status: null, retryable: true });
+  return new WajubError({ ...declined.toJSON(), details: declined.details, http_status: null, retryable: true });
 }
 
 /**
@@ -89,8 +91,14 @@ export interface WatcherOptions {
   lang: Lang;
   /** This attempt was already seen `processing` (its 2xx, or a restore). */
   seenProcessing: boolean;
-  /** Epoch ms when polling gives up: 15 min after the attempt started, or `expires_at` if earlier. */
+  /** Epoch ms when polling gives up: 15 min after the attempt started, or `expires_at` if earlier. Infinity: never. */
   deadline: number;
+  /** Poll once right away, then on the schedule (1.4's `watchStatus()`). */
+  pollImmediately?: boolean;
+  /** Reads the status; `GET /pay/status` by default. */
+  read?: () => Promise<PaymentStatus>;
+  /** Decides on a status; `decideStatus()` by default. */
+  decide?: (status: PaymentStatus, seenProcessing: boolean) => WatchOutcome | null;
   /** The base polling interval; 5 s unless an older API asked otherwise. */
   intervalMs?: number;
   onOutcome(outcome: WatchOutcome): void;
@@ -134,7 +142,7 @@ export class StatusWatcher {
         this.clearTimer();
       }
     });
-    this.schedule(this.baseInterval);
+    this.schedule(this.options.pollImmediately ? 0 : this.baseInterval);
   }
 
   /** A status read right away: the payer came back from a provider's page, or the app to the foreground. */
@@ -202,17 +210,18 @@ export class StatusWatcher {
     this.polling = true;
     let delay: number;
     try {
-      const status = await this.options.client.getStatus(this.options.token);
+      const status = await (this.options.read ? this.options.read() : this.options.client.getStatus(this.options.token));
       this.failures = 0;
       this.handle(status);
       delay = this.nextInterval();
     } catch (e) {
       const error = e instanceof WajubError ? e : null;
       const status = error?.http_status;
+      const cause = error ?? undefined;
       if (status === 401 || status === 403 || status === 404) {
-        this.finish({ kind: 'failed', error: WajubError.create('session_not_found', { lang: this.options.lang, httpStatus: status }) });
+        this.finish({ kind: 'failed', error: WajubError.create('session_not_found', { lang: this.options.lang, httpStatus: status }), cause });
       } else if (status === 410) {
-        this.finish({ kind: 'expired', error: WajubError.create('session_terminal_expired', { lang: this.options.lang, httpStatus: 410 }) });
+        this.finish({ kind: 'expired', error: WajubError.create('session_terminal_expired', { lang: this.options.lang, httpStatus: 410 }), cause });
       }
       this.failures += 1;
       delay = status === 429 && error?.retry_after_seconds ? error.retry_after_seconds * 1000 : this.errorDelay();
@@ -224,13 +233,16 @@ export class StatusWatcher {
 
   /** A status from a poll or the socket. */
   private handle(status: PaymentStatus): void {
-    if (this.stopped) return;
+    // An empty answer, or a frame without a status, says nothing: never read as `pending`.
+    if (this.stopped || !status.status) return;
     if (status.status !== this.lastStatus) {
       this.lastStatus = status.status;
       this.lastChangeAt = Date.now();
     }
     this.options.onStatus?.(status);
-    const outcome = decideStatus(status, this.seenProcessing, this.options.lang);
+    const outcome = this.options.decide
+      ? this.options.decide(status, this.seenProcessing)
+      : decideStatus(status, this.seenProcessing, this.options.lang);
     if (outcome) {
       this.finish(outcome);
       return;

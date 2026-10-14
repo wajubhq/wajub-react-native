@@ -5,7 +5,7 @@ import { stripeInstalled } from './components/StripeCardSection';
 import { CheckoutSheet } from './ui/CheckoutSheet';
 import { createSession, WajubSession } from './WajubSession';
 import { WajubError } from './WajubError';
-import type { CheckoutResult, PaymentResult, PresentOptions } from './types';
+import type { CheckoutResult, PaymentResult, PresentOptions, PresentResult } from './types';
 
 interface WajubContextValue {
   createSession: (token: string) => WajubSession;
@@ -36,6 +36,11 @@ function useWajubContext(): WajubContextValue {
 /** The sheet open in the app: one at a time. */
 let openSheet: CheckoutController | null = null;
 
+/** A sheet is open and has not settled. */
+function sheetOpen(): boolean {
+  return openSheet !== null && !openSheet.closed;
+}
+
 function openController(session: WajubSession, options: PresentOptions): CheckoutController {
   const controller = new CheckoutController(options, { client: session.transport.client, stripeInstalled });
   openSheet = controller;
@@ -57,13 +62,24 @@ export function usePayment() {
   const { createSession: factory } = useWajubContext();
   const [controller, setController] = useState<CheckoutController | null>(null);
   const current = useRef<CheckoutController | null>(null);
+  const mounted = useRef(false);
 
-  // The host goes away: settle, stop watching, never cancel.
-  useEffect(() => () => current.current?.hostGone(), []);
+  // The host goes away: settle, stop watching, never cancel. React may run
+  // this cleanup and mount the same component again (StrictMode, a remount in
+  // one commit): the sheet settles only if it did not.
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      setTimeout(() => {
+        if (!mounted.current) current.current?.hostGone();
+      }, 0);
+    };
+  }, []);
 
   const present = useCallback(
-    (options: PresentOptions): Promise<CheckoutResult> => {
-      if (openSheet) return Promise.reject(WajubError.create('sheet_already_presented'));
+    (options: PresentOptions): Promise<PresentResult> => {
+      if (sheetOpen()) return Promise.reject(WajubError.create('sheet_already_presented'));
       const sheet = openController(factory(options.sessionToken), options);
       current.current = sheet;
       setController(sheet);
@@ -83,10 +99,9 @@ export function usePayment() {
   return { present, PaymentSheet: sheet };
 }
 
-/** A v2 result as 1.4's `PaymentResult`, for the `PaymentSheet` component's `onResult`. */
-function toPaymentResult(result: Exclude<CheckoutResult, { status: 'cancelled' }>): PaymentResult {
+/** An outcome as 1.4's `PaymentResult`, for the `PaymentSheet` component's `onResult`. */
+function toPaymentResult(result: Extract<CheckoutResult, { status: 'complete' | 'failed' }>): PaymentResult {
   if (result.status === 'complete') return { status: 'complete', transaction: result.transaction };
-  if (result.status === 'processing') return { status: 'processing', transaction: result.transaction! };
   return { status: 'failed', error: result.error, transaction: result.transaction };
 }
 
@@ -106,48 +121,51 @@ export interface PaymentSheetProps {
  * @deprecated The 1.4 component, kept for code that renders it directly:
  * use `usePayment()`. It draws the v2 sheet and reports in 1.4's terms.
  */
+type LegacyCallbacks = Pick<PaymentSheetProps, 'onSubmit' | 'onDismiss' | 'onResult'>;
+
+/** Which run of a `PaymentSheet` effect holds each sheet it opened, and whose callbacks it calls. */
+const legacyOwners = new Map<CheckoutController, { owner: symbol; callbacks: React.MutableRefObject<LegacyCallbacks> }>();
+
 export function PaymentSheet({ visible, session, locale, onSubmit, onDismiss, onResult }: PaymentSheetProps) {
   const [controller, setController] = useState<CheckoutController | null>(null);
   const callbacks = useRef({ onSubmit, onDismiss, onResult });
   callbacks.current = { onSubmit, onDismiss, onResult };
-  const current = useRef<{ token: string; sheet: CheckoutController; run: number } | null>(null);
-  const runs = useRef(0);
   const token = session.transport.token;
 
   useEffect(() => {
-    const run = ++runs.current;
     if (!visible) return;
-    let sheet = current.current?.token === token && !current.current.sheet.closed ? current.current.sheet : null;
+    const owner = Symbol('PaymentSheet');
+    // This payment's sheet, still open: an effect run again (StrictMode, a new
+    // `session` object, a remount) takes it back instead of opening another.
+    let sheet = openSheet && sheetOpen() && legacyOwners.has(openSheet) && openSheet.options.sessionToken === token ? openSheet : null;
     if (!sheet) {
-      // Another payment's sheet of this component: it goes away for this one.
-      if (current.current && current.current.sheet === openSheet) {
-        current.current.sheet.hostGone();
-        openSheet = null;
-      }
-      if (openSheet) return;
+      if (sheetOpen()) return;
       sheet = openController(session, {
         sessionToken: token,
         locale,
         cancelOnDismiss: false,
         onStateChange: ({ state }) => {
-          if (state === 'PROCESSING') callbacks.current.onSubmit();
+          if (state === 'PROCESSING') (legacyOwners.get(opened)?.callbacks ?? callbacks).current.onSubmit();
         },
       });
-      void sheet.result.then((result) => {
-        if (result.status === 'cancelled') callbacks.current.onDismiss();
-        else callbacks.current.onResult(toPaymentResult(result));
+      const opened = sheet;
+      // 1.4's meanings: onDismiss when the payer closed the sheet without an outcome, onResult for one.
+      void opened.result.then((result) => {
+        const latest = (legacyOwners.get(opened)?.callbacks ?? callbacks).current;
+        legacyOwners.delete(opened);
+        if (result.status === 'complete' || result.status === 'failed') latest.onResult(toPaymentResult(result));
+        else latest.onDismiss();
       });
-      sheet.start();
+      opened.start();
     }
-    current.current = { token, sheet, run };
+    legacyOwners.set(sheet, { owner, callbacks });
     setController(sheet);
     const mine = sheet;
     return () => {
-      // An effect run again with the same payment (StrictMode, a new `session`
-      // object) keeps the sheet; hidden or unmounted, it settles.
+      // Hidden or unmounted for good: it settles — unless a new run took it back first.
       setTimeout(() => {
-        if (current.current?.sheet !== mine || current.current.run !== run) return;
-        current.current = null;
+        if (legacyOwners.get(mine)?.owner !== owner) return;
+        legacyOwners.delete(mine);
         mine.hostGone();
       }, 0);
     };

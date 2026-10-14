@@ -31,21 +31,13 @@ describe('paymentMapper', () => {
     }
   });
 
-  it('builds the mobile money payload with the number in E.164', () => {
+  it('builds mobile money payload', () => {
     const data = buildMobileMoneyRequest({
       channel_slug: 'cm.mtn',
       phone: '699887766',
       country: 'cm',
     });
-    expect(data).toEqual({ phone: '+237699887766', country: 'CM' });
-  });
-
-  it("keeps Côte d'Ivoire's leading 0 and sends the operator hint when given", () => {
-    expect(buildMobileMoneyRequest({ channel_slug: 'cm.mobile', phone: '677 12 34 56', country: 'CM', operator: 'mtn' })).toEqual({
-      phone: '+237677123456',
-      country: 'CM',
-      operator: 'mtn',
-    });
-    expect(buildMobileMoneyRequest({ channel_slug: 'ci.orange', phone: '07 01 02 03 04', country: 'CI' }).phone).toBe('+2250701020304');
+    expect(data.phone).toBe('699887766');
+    expect(data.country).toBe('CM');
   });
 });

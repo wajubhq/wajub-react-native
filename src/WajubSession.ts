@@ -2,6 +2,7 @@ import { PayClient } from './client/payClient';
 import {
   buildHostedCardRequest,
   buildMobileMoneyRequest,
+  mapProcessOutcome,
   mapProcessResponse,
   mapStatusToResult,
 } from './mappers/paymentMapper';
@@ -16,23 +17,40 @@ import type {
   MobileMoneyInput,
   PaymentResult,
   PaymentStatus,
+  ProcessOutcome,
   SdkConfig,
   SessionData,
   StepVerifyResponse,
+  WajubStorage,
 } from './types';
+
+export interface WajubSessionOptions {
+  /** Where the device fingerprint's install id is kept. Default: AsyncStorage. */
+  storage?: WajubStorage;
+}
 
 /**
  * Session-scoped checkout client — `/pay/*` without WebView, for a host that
  * draws its own UI. Every call goes through the SDK's transport: its headers,
  * timeouts and retries (a payment's retries resend the same Idempotency-Key).
+ * The 1.4 methods report errors as 1.4 did; the v2 ones (`session()`,
+ * `sdkConfig()`, `status()`, `submit()`, the step calls) with the spec's
+ * catalogue.
  */
 export class WajubSession {
   private cachedSession: SessionData | null = null;
+  private readonly client: PayClient;
+  /** The same transport, errors mapped by the spec's catalogue. */
+  private readonly v2: PayClient;
 
   constructor(
     private readonly token: string,
-    private readonly client: PayClient = new PayClient(),
-  ) {}
+    client: PayClient = new PayClient(),
+    options: WajubSessionOptions = {},
+  ) {
+    this.client = options.storage ? client.with({ storage: options.storage }) : client;
+    this.v2 = this.client.with({ errors: 'v2' });
+  }
 
   async loadSession(forceRefresh = false): Promise<SessionData> {
     if (!forceRefresh && this.cachedSession) {
@@ -45,7 +63,8 @@ export class WajubSession {
 
   /** GET /pay/session, fresh. */
   async session(): Promise<SessionData> {
-    return this.loadSession(true);
+    this.cachedSession = await this.v2.getSession(this.token);
+    return this.cachedSession;
   }
 
   async getSdkConfig(): Promise<SdkConfig> {
@@ -54,7 +73,7 @@ export class WajubSession {
 
   /** GET /pay/sdk-config, keyed by raw slug (`cm.mtn`, never `cm.mobile`). */
   async sdkConfig(): Promise<SdkConfig> {
-    return this.getSdkConfig();
+    return this.v2.getSdkConfig(this.token);
   }
 
   /**
@@ -62,14 +81,20 @@ export class WajubSession {
    * not the merchant's reference: never compare the two.
    */
   async status(): Promise<PaymentStatus> {
-    return this.client.getStatus(this.token);
+    return this.v2.getStatus(this.token);
   }
 
   /**
-   * Mobile Money: the number goes out in E.164 (dial code + national digits;
-   * Côte d'Ivoire keeps its leading 0), with `operator` when given — for an
-   * aggregate channel (`cm.mobile`) only, and only an operator the payer named.
+   * POST /pay/process, read spec v2's way (`ProcessOutcome`): the
+   * confirmation steps come with their `stepId` and `hint`. `idempotencyKey`:
+   * one per payment attempt (a new one when absent), reused by the automatic
+   * retries. Mobile Money `data`: `{ phone (E.164), country, operator? }`.
    */
+  async submit(channel: string, data: Record<string, unknown>, options: { idempotencyKey?: string } = {}): Promise<ProcessOutcome> {
+    const raw = await this.v2.process(this.token, channel, data, options);
+    return mapProcessOutcome(raw, this.methodType(channel));
+  }
+
   async payMobileMoney(input: MobileMoneyInput): Promise<PaymentResult> {
     await this.loadSession();
     const data = buildMobileMoneyRequest(input);
@@ -173,22 +198,22 @@ export class WajubSession {
 
   /** `confirm_otp`: the code the payer received (4–10 digits). */
   verifyOtp(otpId: string, code: string): Promise<StepVerifyResponse> {
-    return this.client.verifyStep(this.token, 'otp', { otp_id: otpId, code });
+    return this.v2.verifyStep(this.token, 'otp', { otp_id: otpId, code });
   }
 
   /** `confirm_pin`: the card's PIN (4–6 digits). */
   verifyPin(pinId: string, pin: string): Promise<StepVerifyResponse> {
-    return this.client.verifyStep(this.token, 'pin', { pin_id: pinId, pin });
+    return this.v2.verifyStep(this.token, 'pin', { pin_id: pinId, pin });
   }
 
   /** `confirm_phone`: the payer's phone number. */
   verifyPhone(phoneId: string, phone: string): Promise<StepVerifyResponse> {
-    return this.client.verifyStep(this.token, 'phone', { phone_id: phoneId, phone });
+    return this.v2.verifyStep(this.token, 'phone', { phone_id: phoneId, phone });
   }
 
   /** `confirm_birthday`: `YYYY-MM-DD`. */
   verifyBirthday(birthdayId: string, birthday: string): Promise<StepVerifyResponse> {
-    return this.client.verifyStep(this.token, 'birthday', { birthday_id: birthdayId, birthday });
+    return this.v2.verifyStep(this.token, 'birthday', { birthday_id: birthdayId, birthday });
   }
 
   /** `confirm_address`: every field is required. */
@@ -196,22 +221,22 @@ export class WajubSession {
     addressId: string,
     address: { address: string; city: string; state: string; zip_code: string },
   ): Promise<StepVerifyResponse> {
-    return this.client.verifyStep(this.token, 'address', { address_id: addressId, ...address });
+    return this.v2.verifyStep(this.token, 'address', { address_id: addressId, ...address });
   }
 
   /** Asks for the step again; the API does nothing today, and answers 200. */
   resend(kind: ConfirmStepKind, stepId: string): Promise<void> {
-    return this.client.resendStep(this.token, kind, stepId);
+    return this.v2.resendStep(this.token, kind, stepId);
   }
 
   /** Sandbox 3-D Secure: the code sent by email (`confirm_3ds` with a `stepId`). */
   verify3ds(threeDsId: string, code: string): Promise<void> {
-    return this.client.verify3ds(this.token, threeDsId, code);
+    return this.v2.verify3ds(this.token, threeDsId, code);
   }
 
   /** Sandbox 3-D Secure: a new code by email. */
   send3ds(threeDsId: string): Promise<void> {
-    return this.client.send3ds(this.token, threeDsId);
+    return this.v2.send3ds(this.token, threeDsId);
   }
 
   async handleRedirectAction(result: PaymentResult): Promise<boolean> {
@@ -282,8 +307,8 @@ export class WajubSession {
 }
 
 /** Create a session from the backend `authorization_token`. */
-export function createSession(authorizationToken: string, client?: PayClient): WajubSession {
-  return new WajubSession(authorizationToken, client);
+export function createSession(authorizationToken: string, client?: PayClient, options?: WajubSessionOptions): WajubSession {
+  return new WajubSession(authorizationToken, client, options);
 }
 
 export { mapStatusToResult };

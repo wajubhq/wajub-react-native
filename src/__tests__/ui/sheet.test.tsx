@@ -1,5 +1,5 @@
-import React, { forwardRef, useImperativeHandle } from 'react';
-import { AccessibilityInfo, Animated, Linking, StyleSheet } from 'react-native';
+import React, { forwardRef, useEffect, useImperativeHandle } from 'react';
+import { AccessibilityInfo, Animated, Linking, StyleSheet, View } from 'react-native';
 import { act, configure, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { initStripe } from '@stripe/stripe-react-native';
 
@@ -15,18 +15,45 @@ import type { CheckoutResult, PresentOptions } from '../../types';
 // The first render under React Native's preset can be slow on a loaded machine.
 configure({ asyncUtilTimeout: 5000 });
 
-jest.mock(
-  '@react-native-async-storage/async-storage',
-  () => {
-    const items = new Map<string, string>();
-    return { default: { getItem: async (k: string) => items.get(k) ?? null, setItem: async (k: string, v: string) => void items.set(k, v) } };
-  },
-  { virtual: true },
-);
+/**
+ * React 18 StrictMode, on a concurrent root, runs every effect's first mount
+ * as effect → cleanup → effect. react-test-renderer 18 never does: when `on`,
+ * this applies that behaviour to every `useEffect` (the SDK's and React
+ * Native's) for one test.
+ */
+const mockStrictEffects = { on: false };
+jest.mock('react', () => {
+  const actual = jest.requireActual('react');
+  const useEffect = (effect: () => void | (() => void), deps?: unknown[]) => {
+    const ran = actual.useRef(false);
+    return actual.useEffect(() => {
+      if (!mockStrictEffects.on || ran.current) return effect();
+      ran.current = true;
+      const first = effect();
+      if (typeof first === 'function') first();
+      return effect();
+    }, deps);
+  };
+  return { __esModule: true, ...actual, useEffect, default: { ...actual, useEffect } };
+});
+
 jest.mock('react-native/Libraries/Utilities/useColorScheme', () => ({ __esModule: true, default: jest.fn(() => 'light') }));
 const useColorScheme = jest.requireMock('react-native/Libraries/Utilities/useColorScheme').default as jest.Mock;
 
 let api: FakeApi;
+
+// React Native's components load (and compile, with a cold cache) on first
+// render: once here, outside any test's own time.
+beforeAll(async () => {
+  api = fakeApi({ 'GET /pay/session': 'hang', 'GET /pay/sdk-config': 'hang' });
+  const warm = new CheckoutController({ sessionToken: 'tok_warm', readyTimeout: 0 }, { client: new PayClient({ sleep: async () => undefined }) });
+  render(<CheckoutSheet controller={warm} />);
+  await act(async () => warm.start());
+  await act(async () => warm.hostGone());
+  screen.unmount();
+  api.restore();
+}, 120_000);
+
 afterEach(() => {
   api?.restore();
   jest.restoreAllMocks();
@@ -171,16 +198,31 @@ describe('UI — payment sheet', () => {
     await act(async () => controller.hostGone());
   });
 
-  it("initialises Stripe with the payment's own key", async () => {
-    (initStripe as jest.Mock).mockClear();
-    const controller = await show({ locale: 'en' });
-    await waitFor(() => screen.getByTestId('wajub-method-card'));
-    await act(async () => {
-      fireEvent.press(screen.getByTestId('wajub-method-card'));
-    });
-    // Only the account that issues a pm_ can charge it: sdk-config's publishable key.
-    expect(initStripe).toHaveBeenCalledWith({ publishableKey: 'pk_live_51Hx4mPLACEHOLDER' });
-    await act(async () => controller.hostGone());
+  it("initialises Stripe with the payment's own key, and puts the app's back", async () => {
+    const init = initStripe as jest.Mock;
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    for (const appPublishableKey of [undefined, 'pk_live_app']) {
+      init.mockClear();
+      warn.mockClear();
+      const controller = await show({ locale: 'en', stripe: { appPublishableKey } });
+      await waitFor(() => screen.getByTestId('wajub-method-card'));
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('wajub-method-card'));
+      });
+      // Only the account that issues a pm_ can charge it: sdk-config's publishable key.
+      expect(init.mock.calls).toEqual([[{ publishableKey: 'pk_live_51Hx4mPLACEHOLDER' }]]);
+      await act(async () => controller.hostGone());
+      screen.unmount();
+      if (appPublishableKey) {
+        // The app said which key is its own: it is back once the card form is gone.
+        expect(init.mock.calls[1]).toEqual([{ publishableKey: 'pk_live_app' }]);
+        expect(warn).not.toHaveBeenCalled();
+      } else {
+        // It did not: nothing to put back, and a warning in development says so.
+        expect(init).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('appPublishableKey'));
+      }
+    }
   });
 
   it('draws the Mobile Money form, detection and the approval screen', async () => {
@@ -263,6 +305,153 @@ describe('UI — usePayment', () => {
     });
     expect(onDismiss).toHaveBeenCalledTimes(1);
     expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+  });
+
+  it("keeps the deprecated PaymentSheet's 1.4 callbacks", async () => {
+    api = fakeApi(routes({ 'GET /pay/session': 'session-sandbox-cm', 'GET /pay/sdk-config': 'sdk-config-sandbox', 'POST /pay/process': 'process-processing-mobile-money-sandbox' }));
+    const props = { visible: true, locale: 'en', onSubmit: jest.fn(), onDismiss: jest.fn(), onResult: jest.fn() };
+    render(<PaymentSheet {...props} session={new WajubSession('tok_legacy_cb')} />);
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
+    });
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-phone'), '670000000');
+    });
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-pay'));
+    });
+    // onSubmit as the payer submits, as in 1.4.
+    expect(props.onSubmit).toHaveBeenCalledTimes(1);
+    await waitFor(() => screen.getByTestId('wajub-approval'));
+    // Closed before an outcome: 1.4's onDismiss, not an onResult.
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+    });
+    expect(props.onDismiss).toHaveBeenCalledTimes(1);
+    expect(props.onResult).not.toHaveBeenCalled();
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+  });
+
+  it('opens a sheet right after the previous one settled', async () => {
+    api = fakeApi(routes());
+    const host = React.createRef<{ present(o: PresentOptions): Promise<CheckoutResult> }>();
+    render(<Host ref={host} />);
+    // From onComplete, in the same tick as the settle.
+    let second!: Promise<CheckoutResult>;
+    let first!: Promise<CheckoutResult>;
+    await act(async () => {
+      first = host.current!.present({
+        sessionToken: 'tok_first',
+        readyTimeout: 0,
+        cancelOnDismiss: false,
+        onComplete: () => {
+          second = host.current!.present({ sessionToken: 'tok_second', readyTimeout: 0, cancelOnDismiss: false });
+        },
+      });
+    });
+    await waitFor(() => screen.getByTestId('wajub-dismiss'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+    });
+    await expect(first).resolves.toMatchObject({ status: 'cancelled' });
+    await waitFor(() => expect(api.calls.filter((c) => c.headers.Authorization === 'Bearer tok_second').length).toBeGreaterThan(0));
+    await waitFor(() => screen.getByTestId('wajub-dismiss'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+    });
+    await expect(second).resolves.toMatchObject({ status: 'cancelled' });
+    screen.unmount();
+
+    // A host swapped for another in one commit, which presents as it mounts.
+    function Swapped({ token }: { token: string }) {
+      const { present, PaymentSheet: element } = usePayment();
+      useEffect(() => {
+        void present({ sessionToken: token, readyTimeout: 0, cancelOnDismiss: false }).then((r) => results.push(`${token}:${r.status}`));
+      }, [present, token]);
+      return element;
+    }
+    const results: string[] = [];
+    // A stable parent: the swap happens below the root RNTL queries from.
+    const { rerender } = render(<View><Swapped key="a" token="tok_a" /></View>);
+    await waitFor(() => screen.getByTestId('wajub-dismiss'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+    });
+    rerender(<View><Swapped key="b" token="tok_b" /></View>);
+    await waitFor(() => expect(api.calls.filter((c) => c.headers.Authorization === 'Bearer tok_b').length).toBeGreaterThan(0));
+    await waitFor(() => screen.getByTestId('wajub-dismiss'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+    });
+    await waitFor(() => expect(results).toEqual(['tok_a:cancelled', 'tok_b:cancelled']));
+  });
+
+  it("survives React 18 StrictMode's effects run twice", async () => {
+    api = fakeApi(routes());
+    mockStrictEffects.on = true;
+    try {
+      const effects: string[] = [];
+      function Probe() {
+        useEffect(() => {
+          effects.push('mount');
+          return () => void effects.push('unmount');
+        }, []);
+        return null;
+      }
+      const host = React.createRef<{ present(o: PresentOptions): Promise<CheckoutResult> }>();
+      const onDismiss = jest.fn();
+      render(
+        <React.StrictMode>
+          <Probe />
+          <Host ref={host} />
+          <PaymentSheet visible session={new WajubSession('tok_strict')} onSubmit={() => {}} onDismiss={onDismiss} onResult={() => {}} />
+        </React.StrictMode>,
+      );
+      // The scenario is real: the effects mounted, unmounted and mounted again.
+      expect(effects).toEqual(['mount', 'unmount', 'mount']);
+      await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      // The deprecated component's sheet is the one it opened, still open; the payment loaded once.
+      expect(onDismiss).not.toHaveBeenCalled();
+      expect(api.callsTo('GET /pay/session').filter((c) => c.headers.Authorization === 'Bearer tok_strict')).toHaveLength(1);
+
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('wajub-dismiss'));
+      });
+      expect(onDismiss).toHaveBeenCalledTimes(1);
+
+      // usePayment() in the same tree: its host was never "gone", present() works.
+      let result!: Promise<CheckoutResult>;
+      await act(async () => {
+        result = host.current!.present({ sessionToken: 'tok_strict_hook', readyTimeout: 0, cancelOnDismiss: false });
+      });
+      await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('wajub-dismiss'));
+      });
+      await expect(result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
+    } finally {
+      mockStrictEffects.on = false;
+    }
+  });
+
+  it('keeps the deprecated PaymentSheet when its host remounts', async () => {
+    api = fakeApi(routes());
+    const props = { visible: true, onSubmit: jest.fn(), onDismiss: jest.fn(), onResult: jest.fn() };
+    const { rerender } = render(<View><PaymentSheet key="first" {...props} session={new WajubSession('tok_remount')} /></View>);
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    // A new instance for the same payment, in one commit: it takes the open sheet over.
+    rerender(<View><PaymentSheet key="second" {...props} session={new WajubSession('tok_remount')} /></View>);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(props.onDismiss).not.toHaveBeenCalled();
+    expect(api.callsTo('GET /pay/session')).toHaveLength(1);
+    expect(screen.getByTestId('wajub-method-mobile_money')).toBeTruthy();
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+    });
+    expect(props.onDismiss).toHaveBeenCalledTimes(1);
   });
 
   it('ST-05 rejects a second present', async () => {

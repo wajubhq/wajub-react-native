@@ -105,9 +105,17 @@ export function detectOperator(input: string, country: string): string | null {
   return null;
 }
 
-/** Dial code + national digits; Côte d'Ivoire keeps its leading 0 (the data file's `errata`). */
+/**
+ * Dial code + national digits; Côte d'Ivoire keeps its leading 0 (the data
+ * file's `errata`). A country outside the tables keeps an international
+ * number as typed (`+260971234567`).
+ */
 export function toE164(input: string, country: string): string {
   const rules = countryRules(country);
+  if (!rules) {
+    const typed = input.trim();
+    return /^(\+|00)/.test(typed) ? `+${sanitize(typed.replace(/^00/, ''))}` : sanitize(typed);
+  }
   return `${rules?.dial_code ?? ''}${rules?.e164_trunk_zero === 'keep' ? '0' : ''}${nationalDigits(input, country)}`;
 }
 

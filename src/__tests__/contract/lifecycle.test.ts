@@ -90,6 +90,13 @@ describe('CN — cancel and dismiss', () => {
     kept.controller.dismiss();
     await expect(kept.controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed', redirectUrl: null });
     expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+    api.restore();
+
+    // Closed while the payment is still loading: nothing is known of it, so nothing is cancelled blind.
+    const loading = await sheet({ 'GET /pay/session': 'hang' });
+    loading.controller.dismiss();
+    await expect(loading.controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed', redirectUrl: null });
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
   });
 
   it('CN-03 dismiss after start resolves processing', async () => {
@@ -100,8 +107,36 @@ describe('CN — cancel and dismiss', () => {
     expect(events).toContain('paymentStarted');
     expect(controller.getSnapshot().canCancel).toBe(false);
     controller.dismiss();
-    await expect(controller.result).resolves.toMatchObject({ status: 'processing', transaction: { id: 'trx_test_PVrU8x2kQ1mNa7Lb3cDe' } });
+    await expect(controller.result).resolves.toMatchObject({
+      status: 'processing',
+      transaction: { id: 'trx_test_PVrU8x2kQ1mNa7Lb3cDe' },
+      instruction: body('process-processing-mobile-money-sandbox').transaction.processing_context.payer_instruction,
+    });
     expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+    api.restore();
+
+    // Stripe: the attempt is under way from the Pay press, while Stripe creates the PaymentMethod.
+    jest.useRealTimers();
+    const stripe = await sheet({ 'POST /pay/process': 'process-succeeded-200' });
+    stripe.controller.chooseMethod('card');
+    stripe.controller.beginCardPayment();
+    expect(stripe.controller.getSnapshot()).toMatchObject({ state: 'PROCESSING', busy: true, canCancel: false });
+    stripe.controller.dismiss();
+    await expect(stripe.controller.result).resolves.toMatchObject({ status: 'processing' });
+    // The PaymentMethod arrives after the sheet closed: nothing is charged.
+    await stripe.controller.payStripe('pm_late');
+    expect(api.callsTo('POST /pay/process')).toHaveLength(0);
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+    api.restore();
+
+    // Stripe refused the card: back to the form, and a dismiss then cancels as before any attempt.
+    const refused = await sheet({});
+    refused.controller.chooseMethod('card');
+    refused.controller.beginCardPayment();
+    refused.controller.cardPaymentFailed();
+    expect(refused.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', busy: false, canCancel: true });
+    refused.controller.dismiss();
+    await expect(refused.controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
   });
 
   it('CN-04 handles a refused cancel', async () => {
@@ -118,6 +153,15 @@ describe('CN — cancel and dismiss', () => {
     const viaDismiss = await sheet({ 'POST /pay/cancel': 'cancel-400-not-cancellable', 'GET /pay/status': 'status-succeeded' });
     viaDismiss.controller.dismiss();
     await expect(viaDismiss.controller.result).resolves.toMatchObject({ status: 'complete', payment: { status: 'success' } });
+    api.restore();
+
+    // Refused, and the status cannot be read: the payment may be under way — processing, not cancelled.
+    for (const close of ['cancelPayment', 'dismiss'] as const) {
+      const unknown = await sheet({ 'POST /pay/cancel': 'cancel-400-not-cancellable', 'GET /pay/status': 'network' });
+      await unknown.controller[close]();
+      await expect(unknown.controller.result).resolves.toMatchObject({ status: 'processing', transaction: { id: 'trx_PVrU8x2kQ1mNa7Lb3cDe' } });
+      api.restore();
+    }
   });
 });
 
@@ -238,13 +282,15 @@ describe('ST — states, callbacks, results', () => {
     });
     api.restore();
 
-    // The payer bears the fee: the amount is what they paid.
-    const fee = await sheet({ 'GET /pay/session': 'session-payer-bears-fee', 'POST /pay/process': 'process-succeeded-200' });
+    // The payer bears the fee: the amount is what they paid, the session's amount_total (10 350 for 10 000).
+    const session = body('session-payer-bears-fee');
+    const paidWithFee = { ...body('process-succeeded-200'), transaction: { ...session.transaction, status: 'succeeded' } };
+    const fee = await sheet({ 'GET /pay/session': { status: 200, body: session }, 'POST /pay/process': { status: 200, body: paidWithFee } });
     await payMtn(fee.controller);
     fee.controller.dismiss();
     const withFee = await fee.controller.result;
-    expect(withFee.status === 'complete' && withFee.payment.amount).toBe(body('process-succeeded-200').transaction.amount_total);
-    expect(body('session-payer-bears-fee').transaction.amount_total).toBe(10350);
+    expect(withFee).toMatchObject({ status: 'complete', payment: { amount: 10350, currency: 'XAF', method: 'mobile_money' } });
+    expect(session.transaction.amount).toBe(10000);
   });
 
   it('ST-07 survives throwing callbacks', async () => {
