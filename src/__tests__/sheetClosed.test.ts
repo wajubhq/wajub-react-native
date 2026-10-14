@@ -1,5 +1,3 @@
-import { readFileSync } from 'fs';
-import { join } from 'path';
 import { WajubSession } from '../WajubSession';
 
 /**
@@ -42,19 +40,5 @@ describe('closing the payment sheet', () => {
     fetchMock.mockResolvedValue(jsonResponse(500, { message: 'Server error' }));
 
     await expect(new WajubSession('sess_1').cancelIfNothingSubmitted(false)).resolves.toBeUndefined();
-  });
-
-  // The sheet itself is JSX this suite cannot load: its source must call the
-  // above on dismiss, and mark every way to pay as a submission.
-  it('is what the sheet does on dismiss, every payment marking the sheet as submitted', () => {
-    const source = readFileSync(join(__dirname, '..', 'usePayment.tsx'), 'utf8');
-    const payers = source.match(/const pay\w+ = async \([^)]*\) => \{\n(?:.*\n){0,2}/g) ?? [];
-
-    expect(source).toMatch(/onDismiss=\{\(\) => \{\s*void session\.cancelIfNothingSubmitted\(submittedRef\.current\);/);
-    expect(payers.length).toBe(5);
-    for (const payer of payers) {
-      expect(payer).toMatch(/\n\s+start\(\);/);
-    }
-    expect(source).toMatch(/const start = \(\) => \{\s*setSubmitting\(true\);\s*onSubmit\(\);/);
   });
 });

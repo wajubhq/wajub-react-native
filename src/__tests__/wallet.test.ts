@@ -33,7 +33,8 @@ describe('one-tap wallet channels (e.g. Djamo)', () => {
       const result = await new WajubSession('sess_1').payWallet('ci.djamo');
 
       const processCall = fetchMock.mock.calls.find(([url]: [string]) => url.endsWith('/pay/process'));
-      expect(JSON.parse(processCall[1].body)).toEqual({ channel: 'ci.djamo', data: {} });
+      // Nothing to collect: only the device signals every payment carries.
+      expect(JSON.parse(processCall[1].body)).toEqual({ channel: 'ci.djamo', data: { _client: expect.any(Object) } });
       expect(result).toMatchObject({ status: 'requires_action', action: 'redirect', action_url: 'https://djamo.ci/?type=payment_confirmation' });
     } finally {
       global.fetch = originalFetch;

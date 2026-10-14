@@ -1,5 +1,6 @@
 export { API_URL, HOSTED_CARD_FIELDS, UNSUPPORTED_ACTION_CODE } from './types';
 export type * from './types';
+export { SDK_VERSION } from './version';
 export { WajubError } from './WajubError';
 export { PayClient } from './client/payClient';
 export { createSession, WajubSession } from './WajubSession';
@@ -17,4 +18,6 @@ export { openHostedRedirect, openHostedRedirectAndWait } from './adapters/hosted
 export { handlePaymentAction, openHostedRedirectUrl } from './actionHandler';
 export { subscribeStatus } from './realtime/statusSubscriber';
 export { WajubProvider, usePayment, PaymentSheet } from './usePayment';
+export type { PaymentSheetProps } from './usePayment';
 export { StripeCardSection } from './components/StripeCardSection';
+export { DEFAULT_PALETTES, THEME_PRESETS } from './appearance/theme';

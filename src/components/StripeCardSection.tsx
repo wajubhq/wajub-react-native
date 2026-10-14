@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
-import { View, Text, TextInput, StyleSheet, Pressable, ActivityIndicator } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View } from 'react-native';
 import { createStripePaymentMethod } from '../adapters/stripeAdapter';
 import { sheetStrings } from '../i18n';
+import { Banner, Button, Field } from '../ui/components';
+import { useSheet } from '../ui/theme';
 
 /**
  * The parts of `@stripe/stripe-react-native` this section uses. The module is
@@ -12,6 +14,7 @@ import { sheetStrings } from '../i18n';
 interface StripeModule {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   CardField: React.ComponentType<any>;
+  initStripe?: (params: { publishableKey: string }) => Promise<void>;
   useStripe: () => {
     createPaymentMethod?: (params: {
       paymentMethodType: 'Card';
@@ -39,9 +42,19 @@ export interface StripeCardSectionProps {
   error: string | null;
   /** `fr` or `en`; English when absent. */
   locale?: string | null;
+  /** The Pay button's label; "Pay with card" when absent. */
+  payLabel?: string;
+  /**
+   * The payment's Stripe key (sdk-config `publishable_key`): only the account
+   * that issues a `pm_…` can charge it. When given, Stripe is initialised with it.
+   */
+  publishableKey?: string | null;
 }
 
-/** Native Stripe card fields — requires `StripeProvider` at app root. */
+/**
+ * Native Stripe card fields — requires `StripeProvider` at app root. Drawn
+ * with the payment sheet's theme inside it, the default light one elsewhere.
+ */
 export function StripeCardSection({
   cardholderName,
   onCardholderNameChange,
@@ -49,8 +62,11 @@ export function StripeCardSection({
   submitting,
   error,
   locale,
+  payLabel,
+  publishableKey,
 }: StripeCardSectionProps) {
   const t = sheetStrings(locale);
+  const { theme } = useSheet();
   if (stripeModule === null) {
     throw new Error('StripeCardSection needs @stripe/stripe-react-native. Install it, or take cards another way.');
   }
@@ -58,6 +74,11 @@ export function StripeCardSection({
   const { createPaymentMethod } = stripeModule.useStripe();
   const [cardComplete, setCardComplete] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const initStripe = stripeModule.initStripe;
+
+  useEffect(() => {
+    if (publishableKey && initStripe) void initStripe({ publishableKey }).catch(() => undefined);
+  }, [publishableKey, initStripe]);
 
   const pay = async () => {
     if (!createPaymentMethod) {
@@ -86,63 +107,25 @@ export function StripeCardSection({
     }
   };
 
+  const message = error ?? localError;
   return (
-    <View>
-      {(error ?? localError) ? <Text style={styles.error}>{error ?? localError}</Text> : null}
-      <TextInput
-        style={styles.input}
-        placeholder={t.cardholderName}
-        value={cardholderName}
-        onChangeText={onCardholderNameChange}
-      />
+    <View style={{ gap: theme.gapRow }}>
+      {message ? <Banner message={message} /> : null}
+      <Field label={t.cardholderName} value={cardholderName} onChangeText={onCardholderNameChange} autoCapitalize="words" />
       <CardField
         postalCodeEnabled={false}
-        style={styles.cardField}
+        style={{ width: '100%', height: 50 }}
+        cardStyle={{
+          backgroundColor: theme.colors.inputBackground,
+          borderColor: theme.colors.inputBorder,
+          borderWidth: 1,
+          borderRadius: theme.radius,
+          textColor: theme.colors.text,
+          placeholderColor: theme.colors.textPlaceholder,
+        }}
         onCardChange={(details: { complete: boolean }) => setCardComplete(details.complete)}
       />
-      <Pressable
-        style={[styles.button, (submitting || !cardComplete) && styles.buttonDisabled]}
-        onPress={pay}
-        disabled={submitting || !cardComplete}
-      >
-        {submitting ? (
-          <ActivityIndicator style={{}} />
-        ) : (
-          <Text style={styles.buttonText}>{t.payWithCard}</Text>
-        )}
-      </Pressable>
+      <Button title={payLabel ?? t.payWithCard} onPress={pay} disabled={!cardComplete} loading={submitting} testID="wajub-pay" />
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  input: {
-    borderWidth: 1,
-    borderColor: '#ccc',
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 12,
-  },
-  cardField: {
-    width: '100%',
-    height: 50,
-    marginBottom: 16,
-  },
-  button: {
-    backgroundColor: '#111',
-    borderRadius: 8,
-    padding: 14,
-    alignItems: 'center',
-  },
-  buttonDisabled: {
-    opacity: 0.5,
-  },
-  buttonText: {
-    color: '#fff',
-    fontWeight: '600',
-  },
-  error: {
-    color: '#c62828',
-    marginBottom: 12,
-  },
-});

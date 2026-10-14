@@ -11,14 +11,21 @@ import { subscribeStatus } from './realtime/statusSubscriber';
 import { WajubError } from './WajubError';
 import type {
   ClientSessionOptions,
+  ConfirmStepKind,
   HostedCardField,
   MobileMoneyInput,
   PaymentResult,
+  PaymentStatus,
   SdkConfig,
   SessionData,
+  StepVerifyResponse,
 } from './types';
 
-/** Session-scoped checkout client — `/pay/*` without WebView. */
+/**
+ * Session-scoped checkout client — `/pay/*` without WebView, for a host that
+ * draws its own UI. Every call goes through the SDK's transport: its headers,
+ * timeouts and retries (a payment's retries resend the same Idempotency-Key).
+ */
 export class WajubSession {
   private cachedSession: SessionData | null = null;
 
@@ -36,10 +43,33 @@ export class WajubSession {
     return session;
   }
 
+  /** GET /pay/session, fresh. */
+  async session(): Promise<SessionData> {
+    return this.loadSession(true);
+  }
+
   async getSdkConfig(): Promise<SdkConfig> {
     return this.client.getSdkConfig(this.token);
   }
 
+  /** GET /pay/sdk-config, keyed by raw slug (`cm.mtn`, never `cm.mobile`). */
+  async sdkConfig(): Promise<SdkConfig> {
+    return this.getSdkConfig();
+  }
+
+  /**
+   * GET /pay/status. Its `reference` is the payment's id (`transaction.id`),
+   * not the merchant's reference: never compare the two.
+   */
+  async status(): Promise<PaymentStatus> {
+    return this.client.getStatus(this.token);
+  }
+
+  /**
+   * Mobile Money: the number goes out in E.164 (dial code + national digits;
+   * Côte d'Ivoire keeps its leading 0), with `operator` when given — for an
+   * aggregate channel (`cm.mobile`) only, and only an operator the payer named.
+   */
   async payMobileMoney(input: MobileMoneyInput): Promise<PaymentResult> {
     await this.loadSession();
     const data = buildMobileMoneyRequest(input);
@@ -78,8 +108,12 @@ export class WajubSession {
     return this.process(channel, {});
   }
 
-  async process(channel: string, data: Record<string, unknown>): Promise<PaymentResult> {
-    const raw = await this.client.process(this.token, channel, data);
+  /**
+   * POST /pay/process. `idempotencyKey`: one per payment attempt (a new one
+   * is made when absent); the automatic retries of the call reuse it.
+   */
+  async process(channel: string, data: Record<string, unknown>, options: { idempotencyKey?: string } = {}): Promise<PaymentResult> {
+    const raw = await this.client.process(this.token, channel, data, options);
     return mapProcessResponse(raw, this.methodType(channel));
   }
 
@@ -135,6 +169,51 @@ export class WajubSession {
     }
   }
 
+  // ── confirmation steps: the `stepId` and `hint` of a `requires_action` ──────
+
+  /** `confirm_otp`: the code the payer received (4–10 digits). */
+  verifyOtp(otpId: string, code: string): Promise<StepVerifyResponse> {
+    return this.client.verifyStep(this.token, 'otp', { otp_id: otpId, code });
+  }
+
+  /** `confirm_pin`: the card's PIN (4–6 digits). */
+  verifyPin(pinId: string, pin: string): Promise<StepVerifyResponse> {
+    return this.client.verifyStep(this.token, 'pin', { pin_id: pinId, pin });
+  }
+
+  /** `confirm_phone`: the payer's phone number. */
+  verifyPhone(phoneId: string, phone: string): Promise<StepVerifyResponse> {
+    return this.client.verifyStep(this.token, 'phone', { phone_id: phoneId, phone });
+  }
+
+  /** `confirm_birthday`: `YYYY-MM-DD`. */
+  verifyBirthday(birthdayId: string, birthday: string): Promise<StepVerifyResponse> {
+    return this.client.verifyStep(this.token, 'birthday', { birthday_id: birthdayId, birthday });
+  }
+
+  /** `confirm_address`: every field is required. */
+  verifyAddress(
+    addressId: string,
+    address: { address: string; city: string; state: string; zip_code: string },
+  ): Promise<StepVerifyResponse> {
+    return this.client.verifyStep(this.token, 'address', { address_id: addressId, ...address });
+  }
+
+  /** Asks for the step again; the API does nothing today, and answers 200. */
+  resend(kind: ConfirmStepKind, stepId: string): Promise<void> {
+    return this.client.resendStep(this.token, kind, stepId);
+  }
+
+  /** Sandbox 3-D Secure: the code sent by email (`confirm_3ds` with a `stepId`). */
+  verify3ds(threeDsId: string, code: string): Promise<void> {
+    return this.client.verify3ds(this.token, threeDsId, code);
+  }
+
+  /** Sandbox 3-D Secure: a new code by email. */
+  send3ds(threeDsId: string): Promise<void> {
+    return this.client.send3ds(this.token, threeDsId);
+  }
+
   async handleRedirectAction(result: PaymentResult): Promise<boolean> {
     if (result.status !== 'requires_action') {
       return false;
@@ -167,16 +246,29 @@ export class WajubSession {
     }
   }
 
-  watchStatus(onUpdate: (result: PaymentResult) => void, intervalMs = 5000): () => void {
+  /**
+   * Watches the payment until it ends: polling on the spec's schedule next to
+   * the realtime channel. `onUpdate` gets each new result; returns a stop function.
+   */
+  watchStatus(onUpdate: (result: PaymentResult) => void, intervalMs?: number): () => void {
     let stop: (() => void) | null = null;
+    let stopped = false;
     void this.loadSession().then((session) => {
-      stop = subscribeStatus(this.client, this.token, session, onUpdate, intervalMs);
+      if (!stopped) stop = subscribeStatus(this.client, this.token, session, onUpdate, intervalMs);
     });
-    return () => stop?.();
+    return () => {
+      stopped = true;
+      stop?.();
+    };
   }
 
   cardChannelSlug(): string | undefined {
     return this.cachedSession?.channels.find((c) => c.type.toLowerCase() === 'card')?.slug;
+  }
+
+  /** @internal The token and transport, for the payment sheet built on this session. */
+  get transport(): { token: string; client: PayClient } {
+    return { token: this.token, client: this.client };
   }
 
   private methodType(channel: string): string {

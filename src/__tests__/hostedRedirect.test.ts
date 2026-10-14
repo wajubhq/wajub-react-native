@@ -59,7 +59,9 @@ describe('WajubSession.payCardHostedRedirect', () => {
     const result = await new WajubSession('sess_1').payCardHostedRedirect('card', { email: 'payer@example.test', zip_code: '00225' });
 
     const processCall = fetchMock.mock.calls.find(([url]: [string]) => url.endsWith('/pay/process'));
-    expect(JSON.parse(processCall[1].body)).toEqual({ channel: 'card', data: { email: 'payer@example.test', zip_code: '00225' } });
+    const { channel, data } = JSON.parse(processCall[1].body);
+    expect(channel).toBe('card');
+    expect(data).toEqual({ email: 'payer@example.test', zip_code: '00225', _client: expect.objectContaining({ client: expect.any(String) }) });
     expect(result.status).toBe('requires_action');
   });
 });

@@ -1,132 +1,53 @@
-import Pusher from 'pusher-js';
-
 import { PayClient } from '../client/payClient';
+import { POLLING, StatusWatcher } from '../checkout/watcher';
 import { mapStatusToResult } from '../mappers/paymentMapper';
-import { API_URL } from '../types';
-import type { EchoConfig, PaymentResult, SessionData } from '../types';
-
-const TERMINAL = new Set([
-  'success',
-  'successful',
-  'succeeded',
-  'paid',
-  'complete',
-  'failed',
-  'cancelled',
-  'expired',
-]);
-
-async function pollLoop(
-  client: PayClient,
-  token: string,
-  intervalMs: number,
-  onUpdate: (result: PaymentResult) => void,
-  signal: { active: boolean },
-): Promise<void> {
-  while (signal.active) {
-    try {
-      const session = await client.getSession(token);
-      const result = mapStatusToResult(session.transaction.status, session.transaction);
-      onUpdate(result);
-      if (TERMINAL.has(session.transaction.status.toLowerCase())) {
-        return;
-      }
-    } catch {
-      /* best-effort */
-    }
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-}
+import type { PaymentResult, PresentOptions, SessionData } from '../types';
 
 /**
- * Pusher/Reverb for speed, with polling running next to it for the whole watch:
- * a socket only carries what happens after it subscribed, and a connected one
- * can still miss an event.
+ * Watches a payment for a host that draws its own UI: `GET /pay/status` on
+ * the spec's schedule (5 s, slower after 2 minutes without a change, 15 s
+ * while the socket is up, backing off on errors), next to the payment's
+ * private realtime channel. `onUpdate` is called when the result changes; a
+ * final result — or an ended session (`401`, `410`) — stops the watch, and so
+ * does the 15-minute cap. Returns a function that stops it.
  */
 export function subscribeStatus(
   client: PayClient,
   token: string,
   session: SessionData,
   onUpdate: (result: PaymentResult) => void,
-  intervalMs = 5000,
+  intervalMs: number = POLLING.intervalMs,
+  realtime?: PresentOptions['realtime'],
 ): () => void {
-  const echo = session.echo;
-  if (!echo) {
-    const signal = { active: true };
-    void pollLoop(client, token, intervalMs, onUpdate, signal);
-    return () => {
-      signal.active = false;
-    };
-  }
-
-  return subscribePusher(client, token, session, echo, onUpdate, intervalMs);
-}
-
-function subscribePusher(
-  client: PayClient,
-  token: string,
-  session: SessionData,
-  echo: EchoConfig,
-  onUpdate: (result: PaymentResult) => void,
-  intervalMs: number,
-): () => void {
-  const wsHost = echo.ws_host.replace(/^wss?:\/\//, '');
-  const forceTLS = echo.ws_host.startsWith('wss://');
-
-  const pusher = new Pusher(echo.key, {
-    cluster: 'default',
-    wsHost,
-    wsPort: echo.ws_port,
-    wssPort: echo.ws_port,
-    forceTLS,
-    enabledTransports: ['ws', 'wss'],
-    disableStats: true,
-    // `channel_prefix` is `private-payment.` — this status channel is private,
-    // so pusher-js must authorize it by proving possession of this session's
-    // own bearer token, via the session-scoped authorizer endpoint.
-    channelAuthorization: {
-      endpoint: `${API_URL}/pay/broadcasting/auth`,
-      transport: 'ajax',
-      headers: { Authorization: `Bearer ${token}` },
-    },
-  });
-
-  // The API publishes on the payment's Wajub id and its authorizer signs that
-  // channel only. `reference` is the merchant's own: nothing is published there.
-  const channelName = `${echo.channel_prefix}${session.transaction.id}`;
-  const channel = pusher.subscribe(channelName);
-
-  // Two sources for one status: a result goes out when it changes, and a final
-  // one from the socket stops the polling.
-  const signal = { active: true };
   let last: PaymentResult['status'] | null = null;
   const deliver = (result: PaymentResult) => {
     if (result.status === last) return;
     last = result.status;
     onUpdate(result);
   };
+  const transaction = (status: string) => ({ ...session.transaction, status });
 
-  channel.bind('PaymentStatusUpdated', (data: { status: string }) => {
-    if (TERMINAL.has(data.status.toLowerCase())) {
-      signal.active = false;
-    }
-    deliver(mapStatusToResult(data.status, session.transaction));
-  });
-
-  void pollLoop(
+  const watcher = new StatusWatcher({
     client,
     token,
+    // The API publishes on the payment's Wajub id; `reference` is the merchant's own.
+    transactionId: session.transaction.id,
+    echo: session.echo,
+    realtime,
+    lang: 'en',
+    seenProcessing: false,
+    deadline: Date.now() + POLLING.overallCapMs,
     intervalMs,
-    (result) => {
-      // An answer that was on its way when the polling stopped is out of date.
-      if (signal.active) deliver(result);
+    // Finals come through onOutcome, with the spec's error codes.
+    onStatus: (status) => {
+      const result = mapStatusToResult(status.status, transaction(status.status));
+      if (result.status === 'processing') deliver(result);
     },
-    signal,
-  );
-
-  return () => {
-    signal.active = false;
-    pusher.unsubscribe(channelName);
-    pusher.disconnect();
-  };
+    onOutcome: (outcome) => {
+      if (outcome.kind === 'success') deliver({ status: 'complete', transaction: transaction('succeeded') });
+      else if (outcome.kind !== 'cap') deliver({ status: 'failed', error: outcome.error, transaction: session.transaction });
+    },
+  });
+  watcher.start();
+  return () => watcher.stop();
 }

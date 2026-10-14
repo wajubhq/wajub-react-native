@@ -1,6 +1,6 @@
 import { HOSTED_CARD_FIELDS, UNSUPPORTED_ACTION_CODE } from '../types';
 import type {
-  ClientSession,
+  ActionKind,
   HostedCardField,
   MobileMoneyInput,
   PaymentResult,
@@ -8,26 +8,23 @@ import type {
   SessionChannel,
   SessionTransaction,
 } from '../types';
+import { toE164 } from '../mobileMoney/data';
+import { WajubError } from '../WajubError';
+import type { RawProcessBody } from '../wire/parse';
 
-export interface RawProcessResponse {
-  code: number;
-  status: string;
-  message: string;
-  /** Open-ended on purpose: the API adds actions over time (see mapProcessResponse()). */
-  action?: string | null;
-  transaction?: SessionTransaction;
-  confirm_url?: string;
-  simulator_url?: string;
-  client_session?: ClientSession;
-}
+/** 2xx body of /pay/process and the client-session calls. */
+export type RawProcessResponse = RawProcessBody;
 
-const SUCCESS_STATUSES = new Set(['success', 'successful', 'succeeded', 'paid', 'complete']);
+const SUCCESS_STATUSES = new Set(['success', 'successful', 'succeeded', 'paid', 'complete', 'refunded', 'partially_refunded']);
 
+/** `data` for a Mobile Money charge: the number in E.164, the country, the operator hint when given. */
 export function buildMobileMoneyRequest(input: MobileMoneyInput): Record<string, string> {
-  return {
-    phone: input.phone,
+  const data: Record<string, string> = {
+    phone: toE164(input.phone, input.country),
     country: input.country.toUpperCase(),
   };
+  if (input.operator) data.operator = input.operator;
+  return data;
 }
 
 /**
@@ -69,74 +66,97 @@ export function buildHostedCardRequest(billing: Partial<Record<HostedCardField, 
   return data;
 }
 
+const STEP_FIELDS: Record<string, [keyof RawProcessBody, keyof RawProcessBody]> = {
+  confirm_otp: ['otp_id', 'otp_masked_contact'],
+  confirm_pin: ['pin_id', 'pin_instruction'],
+  confirm_phone: ['phone_id', 'phone_instruction'],
+  confirm_birthday: ['birthday_id', 'birthday_instruction'],
+  confirm_address: ['address_id', 'address_instruction'],
+};
+
+function unsupported(action: string, transaction: SessionTransaction): PaymentResult {
+  return {
+    status: 'failed',
+    error: WajubError.create(UNSUPPORTED_ACTION_CODE, { apiMessage: `Unsupported action: ${action}` }),
+    transaction,
+  };
+}
+
+/**
+ * One `/pay/process` (or client-session) 2xx, for a host that draws its own
+ * UI. The HTTP status, `action` and `transaction.status` decide — never
+ * `message`. An action this SDK cannot perform, or one missing what it needs,
+ * fails as `unsupported_action` instead of an endless `processing`.
+ */
 export function mapProcessResponse(body: RawProcessResponse, methodType: string): PaymentResult {
   const txn = body.transaction;
   if (!txn) {
     return {
       status: 'failed',
-      error: {
-        type: 'payment_error',
-        code: 'invalid_response',
-        message: 'Missing transaction',
-        retryable: false,
-      },
+      error: { type: 'payment_error', code: 'invalid_response', message: 'Missing transaction', retryable: false },
       transaction: null,
     };
   }
 
-  if (!body.action && SUCCESS_STATUSES.has(txn.status.toLowerCase())) {
+  const action = body.action ?? null;
+  if (!action && SUCCESS_STATUSES.has(txn.status.toLowerCase())) {
     return { status: 'complete', transaction: txn };
   }
 
-  if (body.action === 'redirect') {
+  if (action === 'redirect' || action === 'confirm') {
+    const url = body.confirm_url ?? body.simulator_url ?? null;
+    return url ? { status: 'requires_action', action, action_url: url, transaction: txn } : unsupported(action, txn);
+  }
+
+  if (action === 'confirm_3ds') {
+    if (body.confirm_url) {
+      return { status: 'requires_action', action, action_url: body.confirm_url, transaction: txn };
+    }
+    // Sandbox: a code sent by email, verified with WajubSession.verify3ds().
+    if (body.three_ds_id) {
+      return { status: 'requires_action', action, action_url: null, stepId: body.three_ds_id, hint: body.masked_email ?? null, transaction: txn };
+    }
+    return unsupported(action, txn);
+  }
+
+  if (action === 'client_session') {
+    return body.client_session
+      ? {
+          status: 'requires_action',
+          action,
+          action_url: body.client_session.hosted_url ?? null,
+          client_session: body.client_session,
+          transaction: txn,
+        }
+      : unsupported(action, txn);
+  }
+
+  if (action && STEP_FIELDS[action]) {
+    const [idKey, hintKey] = STEP_FIELDS[action];
+    const stepId = body[idKey] as string | undefined;
+    if (!stepId) return unsupported(action, txn);
     return {
       status: 'requires_action',
-      action: 'redirect',
-      action_url: body.confirm_url ?? body.simulator_url ?? null,
+      action: action as ActionKind,
+      action_url: null,
+      stepId,
+      hint: (body[hintKey] as string | undefined) ?? null,
       transaction: txn,
     };
   }
 
-  if (body.action === 'confirm' || body.action === 'confirm_3ds') {
-    return {
-      status: 'requires_action',
-      action: body.action === 'confirm_3ds' ? 'confirm_3ds' : 'confirm',
-      action_url: body.confirm_url ?? body.simulator_url ?? null,
-      transaction: txn,
-    };
-  }
+  if (action) return unsupported(action, txn);
 
-  if (body.action === 'client_session' && body.client_session) {
-    return {
-      status: 'requires_action',
-      action: 'client_session',
-      action_url: body.client_session.hosted_url ?? null,
-      client_session: body.client_session,
-      transaction: txn,
-    };
+  const context = txn.processing_context;
+  if (context?.is_ussd) {
+    return { status: 'processing', transaction: txn, instruction: context.payer_instruction ?? null, kind: 'ussd' };
   }
-
-  // Any other action (confirm_otp, confirm_pin, card_reauth, …) needs a step
-  // this SDK can't perform — fail loudly rather than fall through to
-  // `processing`, which would leave the payer on an endless spinner.
-  if (body.action) {
-    return {
-      status: 'failed',
-      error: {
-        type: 'payment_error',
-        code: UNSUPPORTED_ACTION_CODE,
-        message: `This payment requires a step the Wajub SDK cannot perform (${body.action}). Try another payment method.`,
-        retryable: false,
-      },
-      transaction: txn,
-    };
-  }
-
-  if (methodType === 'mobile_money') {
+  if (methodType === 'mobile_money' || context?.is_mobile_money) {
     return {
       status: 'requires_action',
       action: 'push_approval',
       action_url: body.confirm_url ?? null,
+      hint: context?.payer_instruction ?? null,
       transaction: txn,
     };
   }
@@ -144,7 +164,8 @@ export function mapProcessResponse(body: RawProcessResponse, methodType: string)
   return {
     status: 'processing',
     transaction: txn,
-    instruction: txn.processing_context?.payer_instruction ?? null,
+    instruction: context?.payer_instruction ?? null,
+    kind: 'pending',
   };
 }
 
