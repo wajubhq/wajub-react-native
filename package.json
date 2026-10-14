@@ -13,7 +13,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "jest",
-    "lint": "tsc -p tsconfig.json --noEmit"
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run lint && npm test && npm run build",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "pusher-js": "^8.4.0"
