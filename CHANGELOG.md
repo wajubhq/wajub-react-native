@@ -3,14 +3,16 @@
 ## 1.5.0
 
 - The payment sheet takes the payment to its end. `present()` resolves once, when the sheet
-  closes, with `complete` (and a `PaymentSuccess`), `processing`, `failed` or `cancelled` (with a
-  `reason` and the `redirectUrl`; it still carries `cancelled: true`). It no longer hands back a
-  `requires_action`: the Mobile Money approval, confirmation steps and provider pages happen in the
-  sheet, which watches the status itself.
+  closes, with `complete` (and a `PaymentSuccess`), `processing` (with the payment), `failed` or
+  `cancelled` (with a `reason` and the `redirectUrl`). Code written for 1.4 compiles and runs
+  unchanged: the result still fits `PaymentResult | { cancelled: true }`, and its type still lists
+  `requires_action`, which no longer comes — the Mobile Money approval, confirmation steps and
+  provider pages happen in the sheet, which watches the status itself.
 - `present()` settles even when the screen that opened it unmounts: `cancelled` (`host_gone`)
   before any attempt, `processing` once one started, `complete` after a success — it used to wait
   forever. Polling stops and nothing is cancelled. A second `present()` while a sheet is open is
-  refused with `sheet_already_presented`.
+  refused with `sheet_already_presented`; one called as the previous sheet settles (from
+  `onComplete`, or by the next screen) opens, and React's StrictMode re-runs keep the open sheet.
 - New callbacks, with Wajub.js's names and order: `onReady`, `onStateChange` (Wajub.js's 17 states),
   `onLoadError`, `onPaymentStarted`, `onRedirect`, `onSuccess`, `onError`, `onCancel`, `onComplete`.
   A callback that throws is logged and the sheet carries on.
@@ -42,24 +44,40 @@
   up to three times with backoff, a payment up to twice with the same body and `Idempotency-Key`,
   never a confirmation step. A payment that got no answer is watched, never shown as failed. Every
   payment attempt sends `data._client` (time zone, language, screen, a fingerprint kept per
-  install — install `@react-native-async-storage/async-storage` so it survives restarts; without
-  it the SDK warns in development).
+  install). `@react-native-async-storage/async-storage` is now a peer dependency, so the
+  fingerprint survives restarts; `present({ storage })` or `createSession(token, client,
+  { storage })` keep it in your own storage instead. A missing module never breaks a payment (the
+  SDK warns in development).
+- A payment request that got no answer is watched; if the status still reads `pending` a minute
+  after the last try, the request most likely never reached Wajub: the sheet goes back to the form
+  with a connection message, and the next Pay reuses the same `Idempotency-Key`. A 400 whose status
+  says the payment is running is watched too, never a failure. Closing the sheet while the payment
+  is still loading cancels nothing; a refused cancel whose status cannot be read resolves
+  `processing`. A card or wallet-only payment waits for sdk-config instead of showing "no payment
+  method", and a failed one shows Retry.
 - Watching follows the spec's schedule: every 5 s, slower after two minutes without a change,
   15 s while the realtime socket is up, backing off on errors, 15 minutes at most. It stops on an
   ended session (`410`, `401`) instead of polling forever, and decides on `GET /pay/status`. The
   realtime server is the payment's own (`echo`), or yours with `realtime: { host, port, tls }`;
-  `realtime: { enabled: false }` polls only. `watchStatus()` and `subscribeStatus()` use the same.
-- Errors follow the spec's catalogue: `WajubError` adds `http_status`, `block_reference` and
-  `api_message`, maps every API answer the same way on every SDK, and has its message in the
-  sheet's language (`localized('fr')`, `toJSON()`). `WajubError.fromHttp()` is deprecated.
-- `WajubSession` adds `session()`, `sdkConfig()`, `status()`, `verifyOtp()`, `verifyPin()`,
-  `verifyPhone()`, `verifyBirthday()`, `verifyAddress()`, `resend()`, `verify3ds()` and `send3ds()`;
-  `mapProcessResponse()` returns the confirmation steps with their `stepId` and `hint`.
+  `realtime: { enabled: false }` polls only. `watchStatus()` and `subscribeStatus()` keep 1.4's
+  results and their first read right away, with no time limit; they now slow down, back off on
+  errors and stop on an ended session with a `failed` result, where 1.4 polled it forever.
+- The sheet's errors follow the spec's catalogue: `WajubError` adds `http_status`,
+  `block_reference` and `api_message`, maps every API answer the same way on every SDK, and has its
+  message in the sheet's language (`localized('fr')`, `toJSON()`). The 1.4 `WajubSession` methods
+  keep 1.4's codes and messages. `WajubError.fromHttp()` is deprecated.
+- `WajubSession` adds spec v2's calls: `session()`, `sdkConfig()`, `status()`, `submit()` (and
+  `mapProcessOutcome()`), which returns the confirmation steps with their `stepId` and `hint`,
+  `verifyOtp()`, `verifyPin()`, `verifyPhone()`, `verifyBirthday()`, `verifyAddress()`, `resend()`,
+  `verify3ds()` and `send3ds()`. `process()`, `mapProcessResponse()` and the other 1.4 methods keep
+  1.4's results. `SessionData.parsedBranding` reads `branding` with its types.
 - Stripe cards use the payment's own publishable key from sdk-config: the sheet initialises Stripe
-  with it, so a `StripeProvider` with another key no longer makes every card payment fail.
+  with it, so a `StripeProvider` with another key no longer makes every card payment fail, and puts
+  the app's key back after when given as `present({ stripe: { appPublishableKey } })`.
 - `returnUrl` is sent as `return_url` to the provider's page, `cancelOnDismiss: false` keeps the
   payment open when the sheet is closed before any attempt, and `autoCloseSuccess` sets how long
-  the success screen stays. The `PaymentSheet` component is deprecated in favour of `usePayment()`.
+  the success screen stays. The `PaymentSheet` component is deprecated in favour of
+  `usePayment()`; it keeps its callbacks' 1.4 meanings.
 
 ## 1.4.1
 
