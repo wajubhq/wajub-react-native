@@ -664,9 +664,8 @@ export class CheckoutController {
     if (!method || method.kind !== 'mobile_money' || this.abandoned()) return;
     const sandbox = this.sandboxSession;
     const problem = validateMobileMoney(input.phone, input.country, this.choicesFor(input.country, method), input.choice?.id ?? null, sandbox);
-    // Sandbox test numbers do not follow real numbering plans: a mismatch never blocks there.
-    const blocking = problem && !(problem.code === 'operator_mismatch' && this.sandboxSession);
-    if (problem && blocking) {
+    // In a sandbox session a test number names its own operator, and a mismatch stops as in live.
+    if (problem) {
       const message =
         problem.code === 'operator_mismatch'
           ? WajubError.create('operator_mismatch', { lang: this.lang, vars: { detected: problem.detectedLabel, selected: problem.selectedLabel } }).message

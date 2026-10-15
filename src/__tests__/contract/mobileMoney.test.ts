@@ -57,6 +57,10 @@ describe('MM — Mobile Money', () => {
       expect([v.input, toE164(v.input, v.country)]).toEqual([v.input, v.e164]);
       expect([v.input, formatAsYouType(v.input)]).toEqual([v.input, v.formatted]);
     }
+    // Devanagari and full-width digits, and the astral mathematical ones, read as ASCII too.
+    expect(nationalDigits('०७०७०००००० ', 'CI')).toBe('0707000000');
+    expect(nationalDigits('６７７１２３４５６', 'CM')).toBe('677123456');
+    expect(nationalDigits('𝟔𝟕𝟕𝟏𝟐𝟑𝟒𝟓𝟔', 'CM')).toBe('677123456');
     // Arabic-Indic and Persian keyboards type other digits: the same number is read.
     expect(nationalDigits('٦٧٧ ١٢ ٣٤ ٥٦', 'CM')).toBe('677123456');
     expect(isValidNumber('٦٧٧١٢٣٤٥٦', 'CM')).toBe(true);
@@ -144,9 +148,10 @@ describe('MM — Mobile Money', () => {
   it('MM-02 matches the mismatch vectors', () => {
     for (const v of vectors.validation_and_mismatch) {
       const choices = v.choices.map((id: string) => choice(id));
-      const problem = validateMobileMoney(v.phone, v.country, choices, v.selected);
+      const sandbox = v.sandbox === true;
+      const problem = validateMobileMoney(v.phone, v.country, choices, v.selected, sandbox);
       expect([v.phone, v.selected, problem?.code ?? null]).toEqual([v.phone, v.selected, v.expected]);
-      expect(detectOperator(v.phone, v.country)).toBe(v.detected);
+      expect(detectOperator(v.phone, v.country, sandbox)).toBe(v.detected);
       if (problem?.code === 'operator_mismatch') {
         expect(problem.detected).toBe(v.detected);
         expect(problem.detectedLabel).toBe(operatorLabel(v.detected, v.detected));
@@ -218,11 +223,20 @@ describe('MM — Mobile Money', () => {
     }
   });
 
-  it('MM-08 does not block mismatches in sandbox', async () => {
-    // Sandbox: +23768… is Express Union there, MTN in reality — the number goes out.
-    const sandbox = await sheet('session-sandbox-cm', 'process-processing-mobile-money-sandbox');
-    const orange = operatorChoices(sandbox.controller.getSnapshot().session!.channels, 'CM', 'en').find((c) => c.id === 'orange')!;
+  it('MM-08 reads mismatches in sandbox from the test number', async () => {
+    // Sandbox: an MTN test number on Orange stops on the field, as the sandbox would refuse it…
+    const sandbox = await sheet('session-sandbox-cm', 'process-processing-mobile-money-sandbox', { locale: 'en' });
+    const choices = operatorChoices(sandbox.controller.getSnapshot().session!.channels, 'CM', 'en');
+    const orange = choices.find((c) => c.id === 'orange')!;
+    const mtn = choices.find((c) => c.id === 'mtn')!;
     await sandbox.controller.payMobileMoney({ phone: '670000000', country: 'CM', choice: orange, pickedByHand: true });
+    expect(api.callsTo('POST /pay/process')).toHaveLength(0);
+    expect(sandbox.controller.getSnapshot().fieldErrors.phone).toMatch(/MTN MoMo/);
+    // …+23768… tests Express Union there, where the plan has MTN: not an MTN number…
+    await sandbox.controller.payMobileMoney({ phone: '680000000', country: 'CM', choice: mtn, pickedByHand: true });
+    expect(api.callsTo('POST /pay/process')).toHaveLength(0);
+    // …and an MTN test number on MTN goes out.
+    await sandbox.controller.payMobileMoney({ phone: '670000000', country: 'CM', choice: mtn, pickedByHand: true });
     expect(api.callsTo('POST /pay/process')).toHaveLength(1);
     sandbox.controller.hostGone();
     api.restore();

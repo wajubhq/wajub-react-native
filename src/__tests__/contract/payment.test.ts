@@ -255,8 +255,8 @@ describe('PA — process answers', () => {
     validation.controller.hostGone();
     api.restore();
 
-    // An Orange number on cm.mtn (sandbox lets it through): the API's English
-    // refusal becomes the SDK's own words.
+    // A number the sheet names no operator for, refused on cm.mtn as an Orange one by the
+    // API's own lookup: its English refusal becomes the SDK's own words.
     const operators = body('session-sandbox-cm');
     const single = operators.channels.find((c: { slug: string }) => c.slug === 'cm.eu');
     operators.channels = ['mtn', 'orange'].map((op) => ({ ...single, id: `cm.${op}`, slug: `cm.${op}`, logo: null, logo_png: null }));
@@ -266,7 +266,7 @@ describe('PA — process answers', () => {
     );
     mismatch.controller.chooseMethod('mobile_money');
     const mtn = operatorChoices(mismatch.controller.getSnapshot().session!.channels, 'CM', 'en')[0];
-    await mismatch.controller.payMobileMoney({ phone: '691234567', country: 'CM', choice: mtn, pickedByHand: true });
+    await mismatch.controller.payMobileMoney({ phone: '621234567', country: 'CM', choice: mtn, pickedByHand: true });
     await settle();
     expect(api.callsTo('POST /pay/process')[0].body.channel).toBe('cm.mtn');
     expect(mismatch.controller.getSnapshot().fieldErrors.phone).toBe(

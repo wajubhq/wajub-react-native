@@ -1,15 +1,30 @@
 /**
- * The first digit (0) of the decimal digit sets a phone keyboard may type
- * besides ASCII: Arabic-Indic (Egypt, Morocco…), Persian, N'Ko, full-width.
+ * The 0 of every set of Unicode decimal digits besides ASCII (general category
+ * Nd, Unicode 16): Arabic-Indic, Persian, N'Ko, Devanagari, Bengali, Thai,
+ * full-width… Each set is a run of ten, 0 to 9.
  */
-const DIGIT_ZEROS = [0x0660, 0x06f0, 0x07c0, 0xff10];
+const DIGIT_ZEROS: readonly number[] = [
+  0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66,
+  0xbe6, 0xc66, 0xce6, 0xd66, 0xde6, 0xe50, 0xed0, 0xf20,
+  0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90,
+  0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0,
+  0xa9f0, 0xaa50, 0xabf0, 0xff10, 0x104a0, 0x10d30, 0x10d40, 0x11066,
+  0x110f0, 0x11136, 0x111d0, 0x112f0, 0x11450, 0x114d0, 0x11650, 0x116c0,
+  0x116d0, 0x116da, 0x11730, 0x118e0, 0x11950, 0x11bf0, 0x11c50, 0x11d50,
+  0x11da0, 0x11de0, 0x11f50, 0x16130, 0x16a60, 0x16ac0, 0x16b50, 0x16d70,
+  0x1ccf0, 0x1d7ce, 0x1d7d8, 0x1d7e2, 0x1d7ec, 0x1d7f6, 0x1e140, 0x1e2f0,
+  0x1e4f0, 0x1e5f1, 0x1e950, 0x1fbf0,
+];
 
-/** Other decimal digits as ASCII ones ('٦٧' → '67'): what the payer typed is what is read. */
+/**
+ * Every decimal digit as its ASCII digit ('٦٧' → '67', '۰۷' → '07'), as the
+ * payer types it: what the payer typed is what is read.
+ */
 export function toAsciiDigits(input: string): string {
   let out = '';
   for (const ch of input) {
-    const code = ch.charCodeAt(0);
-    const zero = DIGIT_ZEROS.find((z) => code >= z && code <= z + 9);
+    const code = ch.codePointAt(0) ?? 0;
+    const zero = code > 0x7f ? DIGIT_ZEROS.find((z) => code >= z && code <= z + 9) : undefined;
     out += zero === undefined ? ch : String(code - zero);
   }
   return out;
