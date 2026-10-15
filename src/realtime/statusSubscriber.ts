@@ -2,7 +2,7 @@ import { PayClient } from '../client/payClient';
 import { POLLING, StatusWatcher } from '../checkout/watcher';
 import type { WatchOutcome } from '../checkout/watcher';
 import { mapStatusToResult } from '../mappers/paymentMapper';
-import type { PaymentResult, PresentOptions, SessionData, SessionTransaction } from '../types';
+import type { PaymentResult, SessionData, SessionTransaction } from '../types';
 
 /** 1.4's final statuses. */
 const SUCCESS = ['success', 'successful', 'succeeded', 'paid', 'complete'];
@@ -27,7 +27,6 @@ export function subscribeStatus(
   session: SessionData,
   onUpdate: (result: PaymentResult) => void,
   intervalMs: number = POLLING.intervalMs,
-  realtime?: PresentOptions['realtime'],
 ): () => void {
   // 1.4 told every poll when it only polled, and each change once with a socket beside the polls.
   const dedup = Boolean(session.echo);
@@ -46,7 +45,6 @@ export function subscribeStatus(
     // The API publishes on the payment's Wajub id; `reference` is the merchant's own.
     transactionId: session.transaction.id,
     echo: session.echo,
-    realtime,
     lang: 'en',
     seenProcessing: false,
     deadline: Infinity,

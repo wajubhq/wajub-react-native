@@ -9,7 +9,7 @@ import type { AppStateStatus, NativeEventSubscription } from 'react-native';
 import { monotonicNow } from '../clock';
 import type { PayClient } from '../client/payClient';
 import type { Lang } from '../errorCatalogue';
-import type { EchoConfig, PaymentStatus, PresentOptions } from '../types';
+import type { EchoConfig, PaymentStatus } from '../types';
 import { WajubError } from '../WajubError';
 import { parseStatus } from '../wire/parse';
 
@@ -64,20 +64,17 @@ export function decideStatus(status: PaymentStatus, seenProcessing: boolean, lan
   return null;
 }
 
-/** Where the realtime socket goes: `echo`, overridden by `PresentOptions.realtime`; null for polling only. */
-export function realtimeConfig(
-  echo: EchoConfig | null | undefined,
-  override: PresentOptions['realtime'],
-): { key: string; host: string; port: number; tls: boolean; channelPrefix: string } | null {
-  if (override?.enabled === false || !echo?.key) return null;
+/** Where the realtime socket goes: the session's `echo`; null (no `echo`, no key) for polling only. */
+export function realtimeConfig(echo: EchoConfig | null | undefined): { key: string; host: string; port: number; tls: boolean; channelPrefix: string } | null {
+  if (!echo?.key) return null;
   const match = /^(wss?):\/\/([^/:]+)/i.exec(echo.ws_host);
-  const host = override?.host ?? match?.[2] ?? echo.ws_host;
+  const host = match?.[2] ?? echo.ws_host;
   if (!host) return null;
   return {
     key: echo.key,
     host,
-    port: override?.port ?? echo.ws_port,
-    tls: override?.tls ?? (match ? match[1].toLowerCase() === 'wss' : true),
+    port: echo.ws_port,
+    tls: match ? match[1].toLowerCase() === 'wss' : true,
     channelPrefix: echo.channel_prefix,
   };
 }
@@ -88,7 +85,6 @@ export interface WatcherOptions {
   /** `transaction.id`: the channel suffix. */
   transactionId: string;
   echo?: EchoConfig | null;
-  realtime?: PresentOptions['realtime'];
   lang: Lang;
   /** This attempt was already seen `processing` (its 2xx, or a restore). */
   seenProcessing: boolean;
@@ -258,7 +254,7 @@ export class StatusWatcher {
   }
 
   private connectRealtime(): void {
-    const config = realtimeConfig(this.options.echo, this.options.realtime);
+    const config = realtimeConfig(this.options.echo);
     if (!config) return;
     const { client, token } = this.options;
     try {

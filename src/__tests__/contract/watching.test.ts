@@ -31,7 +31,7 @@ const watchers: StatusWatcher[] = [];
 
 function watch(
   c: PayClient,
-  options: { echo?: EchoConfig | null; seenProcessing?: boolean; deadline?: number; realtime?: object; transactionId?: string } = {},
+  options: { echo?: EchoConfig | null; seenProcessing?: boolean; deadline?: number; transactionId?: string } = {},
 ) {
   const outcomes: WatchOutcome[] = [];
   const watcher = new StatusWatcher({
@@ -39,7 +39,6 @@ function watch(
     token: 'tok',
     transactionId: options.transactionId ?? 'trx_PVrU8x2kQ1mNa7Lb3cDe',
     echo: options.echo ?? null,
-    realtime: options.realtime,
     lang: 'en',
     seenProcessing: options.seenProcessing ?? true,
     deadline: options.deadline ?? monotonicNow() + POLLING.overallCapMs,
@@ -206,23 +205,19 @@ describe('WT — watching', () => {
   });
 
   it('WT-03 subscribes to the payment channel', async () => {
-    // Self-hosted Reverb, hosted Pusher, and a Reverb behind another hostname.
-    expect(realtimeConfig(ECHO, undefined)).toEqual({ key: 'wajub-app-key', host: 'ws.wajub.com', port: 443, tls: true, channelPrefix: 'private-payment.' });
+    // Self-hosted Reverb, hosted Pusher, a plain socket: from the session's `echo` only.
+    expect(realtimeConfig(ECHO)).toEqual({ key: 'wajub-app-key', host: 'ws.wajub.com', port: 443, tls: true, channelPrefix: 'private-payment.' });
     const pusher = parseSession(body('session-ci-xof-wallets')).echo!;
-    expect(realtimeConfig(pusher, undefined)).toMatchObject({ key: 'pusher-app-key', host: 'ws-eu.pusher.com', port: 443, tls: true });
-    expect(realtimeConfig(ECHO, { host: 'reverb.shop.example', port: 8080, tls: false })).toMatchObject({ host: 'reverb.shop.example', port: 8080, tls: false });
-    expect(realtimeConfig({ ...ECHO, ws_host: 'ws://localhost', ws_port: 6001 }, undefined)).toMatchObject({ host: 'localhost', port: 6001, tls: false });
+    expect(realtimeConfig(pusher)).toMatchObject({ key: 'pusher-app-key', host: 'ws-eu.pusher.com', port: 443, tls: true });
+    expect(realtimeConfig({ ...ECHO, ws_host: 'ws://localhost', ws_port: 6001 })).toMatchObject({ host: 'localhost', port: 6001, tls: false });
 
     const c = client(() => processing);
-    watch(c.client, { echo: ECHO, realtime: { host: 'reverb.shop.example', port: 8080, tls: false } });
+    watch(c.client, { echo: ECHO });
     const socket = FakePusher.instances[0];
     expect(socket.key).toBe('wajub-app-key');
-    expect(socket.options).toMatchObject({ wsHost: 'reverb.shop.example', wsPort: 8080, wssPort: 8080, forceTLS: false });
+    expect(socket.options).toMatchObject({ wsHost: 'ws.wajub.com', wsPort: 443, wssPort: 443, forceTLS: true });
     // pusher-js names its TLS socket "ws" too (with forceTLS): it must stay enabled.
     expect(socket.options.enabledTransports).toEqual(['ws', 'wss']);
-    watch(c.client, { echo: ECHO });
-    expect(FakePusher.instances[1].options).toMatchObject({ wsHost: 'ws.wajub.com', wsPort: 443, wssPort: 443, forceTLS: true, enabledTransports: ['ws', 'wss'] });
-    FakePusher.instances.length = 1;
     expect([...socket.channels.keys()]).toEqual(['private-payment.trx_PVrU8x2kQ1mNa7Lb3cDe']);
     expect(socket.channels.get('private-payment.trx_PVrU8x2kQ1mNa7Lb3cDe')!.bind).toHaveBeenCalledWith('PaymentStatusUpdated', expect.any(Function));
 
@@ -242,16 +237,17 @@ describe('WT — watching', () => {
   });
 
   it('WT-04 falls back to polling', async () => {
-    // `key: null` (sandbox), no echo, realtime turned off: no socket, polling at 5 s.
-    for (const echo of [parseSession(body('session-sandbox-cm')).echo!, null]) {
+    // `echo` absent (2.1, sandbox), `key: null` (2.0), none at all: no socket, polling at 5 s.
+    const sandbox = parseSession(body('session-sandbox-cm')).echo;
+    expect(sandbox).toBeUndefined();
+    const keyless = parseSession(body('session-processing-mobile-money')).echo!;
+    expect(keyless.key).toBe('');
+    for (const echo of [sandbox, keyless, null]) {
       const c = client(() => processing);
       watch(c.client, { echo });
       expect(FakePusher.instances).toHaveLength(0);
       expect(await pollTimes(c.getStatus, 15_000)).toEqual([5_000, 10_000, 15_000]);
     }
-    const off = client(() => processing);
-    watch(off.client, { echo: ECHO, realtime: { enabled: false } });
-    expect(FakePusher.instances).toHaveLength(0);
 
     // A socket that never connects (or drops) leaves polling at 5 s.
     const never = client(() => processing);

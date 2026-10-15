@@ -1366,7 +1366,6 @@ export class CheckoutController {
       token: this.token,
       transactionId: this.transaction?.id ?? '',
       echo: this.snapshot.session?.echo,
-      realtime: this.options.realtime,
       lang: this.lang,
       seenProcessing,
       deadline: attemptStart + POLLING.overallCapMs,

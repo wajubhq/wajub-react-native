@@ -723,8 +723,6 @@ export interface PresentOptions extends CheckoutCallbacks {
     /** "detect": no operator list until the number does not tell. Default "choose". */
     operatorMode?: 'choose' | 'detect';
   };
-  /** Override the realtime server (a self-hosted Reverb or Soketi), or turn realtime off. */
-  realtime?: { enabled?: boolean; host?: string; port?: number; tls?: boolean };
   /** A dismiss before any attempt cancels the payment (POST /pay/cancel). Default true. */
   cancelOnDismiss?: boolean;
   /** ms before the success screen closes itself; 0 keeps it. Default 3000. */
