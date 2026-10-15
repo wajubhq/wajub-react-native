@@ -3,6 +3,7 @@
  * MobileMoneyForm applies them: choices, preselection, validation order and
  * the operator hint.
  */
+import { drawableLogo } from '../checkout/logo';
 import type { SessionChannel } from '../types';
 import { detectOperator, isOperatorIndependent, isValidNumber, operatorLabel, toE164 } from './data';
 
@@ -16,6 +17,7 @@ export interface OperatorChoice {
   viaAggregate: boolean;
   /** The channel's (or aggregate member's) name, in the sheet's language. */
   name: string;
+  /** An image the sheet can draw (a PNG, or a logo that is not an SVG); `null` → the brand badge. */
   logo: string | null;
   /** What the list shows: the brand's label, else `name`. */
   label: string;
@@ -72,7 +74,7 @@ export function operatorChoices(channels: SessionChannel[], country: string, lan
     if (!isMobileMoneyChannel(channel) || !covers(channel, country)) continue;
     if (channel.operators && channel.operators.length > 0) {
       for (const member of channel.operators) {
-        add({ id: member.operator, channel: channel.slug, viaAggregate: true, name: member.name, logo: member.logo });
+        add({ id: member.operator, channel: channel.slug, viaAggregate: true, name: member.name, logo: drawableLogo(member.logo, member.logo_png) });
       }
     } else {
       const parts = channel.slug.toLowerCase().split('.');
@@ -81,7 +83,7 @@ export function operatorChoices(channels: SessionChannel[], country: string, lan
         channel: channel.slug,
         viaAggregate: false,
         name: channelName(channel, lang),
-        logo: channel.logo ?? null,
+        logo: drawableLogo(channel.logo, channel.logo_png),
       });
     }
   }

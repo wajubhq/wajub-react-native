@@ -369,9 +369,12 @@ describe('TR — transport', () => {
       await settle();
     };
 
-    // The status carries the decline of an earlier try, from before this sheet: the 60 s rule still applies.
+    // The status carries the decline of an earlier try, from before this sheet, and the session (a
+    // 2.0 answer, without `transaction.error_code`) did not say: unknown — the 60 s rule still applies.
+    const older = body('session-cm-aggregate');
+    delete older.transaction.error_code;
     api = fakeApi({
-      'GET /pay/session': 'session-cm-aggregate',
+      'GET /pay/session': { status: 200, body: older },
       'GET /pay/sdk-config': 'sdk-config-cm-stripe',
       'POST /pay/process': 'network',
       'GET /pay/status': pendingWith('insufficient_funds'),

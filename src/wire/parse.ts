@@ -140,18 +140,22 @@ export function parseTransaction(raw: unknown, strict = false): SessionTransacti
     updated_at: nullable(text(t.updated_at)),
     terminal_at: nullable(text(t.terminal_at)),
   };
+  // The refusal left on a payment back at `pending` (null: none). Absent from older answers: unknown.
+  if ('error_code' in t) transaction.error_code = nullable(text(t.error_code));
   if (customer === null) transaction.customer = null;
   else if (customer) transaction.customer = keep(customer, { name: nullable(str(customer.name)), email: nullable(str(customer.email)) });
   const context = parseProcessingContext(t.processing_context);
   if (context) transaction.processing_context = context;
-  return keep(t, transaction, ['customer', 'processing_context']);
+  return keep(t, transaction, ['customer', 'processing_context', 'error_code']);
 }
 
 function parseOperator(raw: unknown): ChannelOperator | undefined {
   const o = obj(raw);
   const operator = text(o?.operator);
   if (!o || !operator) return undefined;
-  return keep(o, { slug: str(o.slug) ?? '', operator: operator.toLowerCase(), name: str(o.name) ?? operator, logo: nullable(text(o.logo)) });
+  const operatorEntry: ChannelOperator = { slug: str(o.slug) ?? '', operator: operator.toLowerCase(), name: str(o.name) ?? operator, logo: nullable(text(o.logo)) };
+  if ('logo_png' in o) operatorEntry.logo_png = nullable(text(o.logo_png));
+  return keep(o, operatorEntry);
 }
 
 export function parseChannel(raw: unknown): SessionChannel | undefined {
@@ -174,6 +178,7 @@ export function parseChannel(raw: unknown): SessionChannel | undefined {
     channel['name.fr'] = nameFr;
     channel.name_fr = nameFr;
   }
+  if ('logo_png' in c) channel.logo_png = nullable(text(c.logo_png));
   const min = num(c.min_amount);
   const max = num(c.max_amount);
   if (min !== undefined) channel.min_amount = min;
@@ -182,7 +187,7 @@ export function parseChannel(raw: unknown): SessionChannel | undefined {
     .map(parseOperator)
     .filter((o): o is ChannelOperator => !!o);
   if (operators.length > 0) channel.operators = operators;
-  return keep(c, channel, ['name.fr', 'name_fr', 'min_amount', 'max_amount', 'operators']);
+  return keep(c, channel, ['name.fr', 'name_fr', 'min_amount', 'max_amount', 'operators', 'logo_png']);
 }
 
 function parseEcho(raw: unknown): EchoConfig | undefined {
@@ -424,7 +429,10 @@ export function parseProcess(raw: unknown): RawProcessBody {
 export function parseStepVerify(raw: unknown): StepVerifyResponse {
   const b = obj(raw) ?? {};
   if (str(b.status)?.toLowerCase() === 'success') {
-    return { status: 'success', transaction: obj(b.transaction) ? parseTransaction(b.transaction) : null };
+    const success: StepVerifyResponse = { status: 'success', transaction: obj(b.transaction) ? parseTransaction(b.transaction) : null };
+    // The provider asks for another step: its action and fields, read as a payment's answer reads them.
+    const { code: _code, status: _status, message: _message, transaction: _transaction, ...next } = parseProcess(b);
+    return next.action ? { ...success, ...next, action: next.action } : success;
   }
   const error = obj(b.error) ?? {};
   return {

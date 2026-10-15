@@ -1,4 +1,5 @@
 import { availableMethods, mobileMoneyConfig } from '../../checkout/methods';
+import { operatorChoices } from '../../mobileMoney/form';
 import type { MethodEntry } from '../../checkout/methods';
 import { makeController } from '../../test/checkout';
 import { body, fakeApi, settle } from '../../test/fakeApi';
@@ -230,6 +231,57 @@ describe('LD — loading', () => {
     controller.hostGone();
   });
 
+  it('LD-10 reads the refusal left at load', async () => {
+    jest.useFakeTimers();
+    const pay = async (controller: ReturnType<typeof makeController>['controller']) => {
+      controller.chooseMethod('mobile_money');
+      const choice = operatorChoices(controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+      await controller.payMobileMoney({ phone: '670000000', country: 'CM', choice, pickedByHand: true });
+      await settle();
+    };
+
+    // Back at `pending` after a refusal: the form opens, nothing failed, no error.
+    api = fakeApi({
+      'GET /pay/session': 'session-pending-after-refusal',
+      'GET /pay/sdk-config': 'sdk-config-sandbox',
+      'POST /pay/process': 'network',
+      'GET /pay/status': 'status-pending-attempt-refused',
+    });
+    const onError = jest.fn();
+    const onLoadError = jest.fn();
+    const left = makeController({ onError, onLoadError, locale: 'en' });
+    left.controller.start();
+    await settle();
+    expect(left.controller.getSnapshot().screen.name).toBe('methods');
+    expect(onError).not.toHaveBeenCalled();
+    expect(onLoadError).not.toHaveBeenCalled();
+    // A request that got no answer, then the same code on the status: the old refusal, not this
+    // attempt's — watched until the 60 s rule sends the payer back to the form.
+    await pay(left.controller);
+    expect(left.controller.getSnapshot().state).toBe('PENDING');
+    await jest.advanceTimersByTimeAsync(55_000);
+    expect(left.controller.getSnapshot().state).toBe('PENDING');
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(left.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', banner: { code: 'network_error' } });
+    left.controller.hostGone();
+    api.restore();
+
+    // No refusal at load (`error_code: null`): the same status is this attempt's refusal, at once.
+    api = fakeApi({
+      'GET /pay/session': 'session-cm-aggregate',
+      'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+      'POST /pay/process': 'network',
+      'GET /pay/status': 'status-pending-attempt-refused',
+    });
+    const fresh = makeController({ locale: 'en' });
+    fresh.controller.start();
+    await settle();
+    await pay(fresh.controller);
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(fresh.controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { retryable: true } });
+    fresh.controller.hostGone();
+  });
+
   it('LD-08 raises ready_timeout', async () => {
     jest.useFakeTimers();
     let release!: () => void;
@@ -286,7 +338,8 @@ describe('CH — channels', () => {
     expect(ci[1]).toMatchObject({ slugs: ['ci.mtn', 'ci.moov', 'ci.orange', 'ci.wave'] });
 
     const sandbox = methods('session-sandbox-cm', 'sdk-config-sandbox');
-    expect(sandbox.map((m) => `${m.kind}:${m.kind === 'card' ? m.flavor : ''}`)).toEqual(['mobile_money:', 'card:sandbox_form']);
+    // In the API's order (2.1 sends card first here).
+    expect(sandbox.map((m) => `${m.kind}:${m.kind === 'card' ? m.flavor : ''}`)).toEqual(['card:sandbox_form', 'mobile_money:']);
 
     // Types v2 does not offer are hidden; nothing left is a load error.
     const raw = body('session-ci-xof-wallets');
@@ -308,25 +361,48 @@ describe('CH — channels', () => {
 
   it('CH-03 resolves sdk-config for aggregates', () => {
     const session = parseSession(body('session-cm-aggregate'));
-    const config = parseSdkConfig(body('sdk-config-cm-stripe'));
     const aggregate = session.channels.find((c) => c.slug === 'cm.mobile')!;
-    expect(config.channels['cm.mobile']).toBeUndefined();
-    expect(mobileMoneyConfig(aggregate, config)).toBe(config.channels['cm.mtn']);
+
+    // 2.1: the aggregate has its own entry, beside its members'.
+    const config = parseSdkConfig(body('sdk-config-cm-stripe'));
+    expect(config.channels['cm.mobile']).toBeDefined();
+    expect(mobileMoneyConfig(aggregate, config)).toBe(config.channels['cm.mobile']);
+    // The operator picked: its member's entry.
     expect(mobileMoneyConfig(aggregate, config, 'orange')).toBe(config.channels['cm.orange']);
+    // The aggregate's own entry unavailable: Mobile Money is not offered.
+    const off = parseSdkConfig(body('sdk-config-cm-stripe'));
+    off.channels['cm.mobile'].available = false;
+    expect(availableMethods(session, off, 'en', true).some((m) => m.kind === 'mobile_money')).toBe(false);
+
+    // 2.0: members only — a member's entry.
+    const members = body('sdk-config-cm-stripe');
+    delete members.channels['cm.mobile'];
+    const old = parseSdkConfig(members);
+    expect(mobileMoneyConfig(aggregate, old)).toBe(old.channels['cm.mtn']);
+    expect(mobileMoneyConfig(aggregate, old, 'orange')).toBe(old.channels['cm.orange']);
 
     // A member sdk-config marks unavailable leaves the aggregate's list.
-    config.channels['cm.orange'].available = false;
-    const momo = availableMethods(session, config, 'en', true).find((m) => m.kind === 'mobile_money');
-    expect(momo?.kind === 'mobile_money' && momo.channels[0].operators?.map((o) => o.operator)).toEqual(['mtn']);
+    for (const answer of [config, old]) {
+      const copy = { channels: { ...answer.channels, 'cm.orange': { ...answer.channels['cm.orange'], available: false } } };
+      const momo = availableMethods(session, copy, 'en', true).find((m) => m.kind === 'mobile_money');
+      expect(momo?.kind === 'mobile_money' && momo.channels[0].operators?.map((o) => o.operator)).toEqual(['mtn']);
+    }
   });
 
   it('CH-04 defaults mobile money without sdk-config', async () => {
-    // Sandbox sdk-config has no Mobile Money entry: a phone form all the same.
-    const { controller } = await load('session-sandbox-cm', 'sdk-config-sandbox');
-    expect(controller.getSnapshot().methods.find((m) => m.kind === 'mobile_money')).toMatchObject({ slugs: ['cm.eu', 'cm.mobile'] });
-    controller.chooseMethod('mobile_money');
-    expect(controller.getSnapshot().screen).toMatchObject({ name: 'form', method: { kind: 'mobile_money' } });
-    controller.hostGone();
+    // 2.1: the sandbox's Mobile Money entries (a phone form); a 2.0 answer had none: a phone form all the same.
+    const withEntries = body('sdk-config-sandbox');
+    expect(withEntries.channels['cm.mobile']).toMatchObject({ sdk: 'form', required_fields: ['phone'] });
+    const without = body('sdk-config-sandbox');
+    for (const slug of Object.keys(without.channels)) if (slug.startsWith('cm.')) delete without.channels[slug];
+    for (const config of [withEntries, without]) {
+      const { controller } = await load('session-sandbox-cm', { status: 200, body: config });
+      expect(controller.getSnapshot().methods.find((m) => m.kind === 'mobile_money')).toMatchObject({ slugs: ['cm.eu', 'cm.mobile'] });
+      controller.chooseMethod('mobile_money');
+      expect(controller.getSnapshot().screen).toMatchObject({ name: 'form', method: { kind: 'mobile_money' } });
+      controller.hostGone();
+      api.restore();
+    }
   });
 
   it('CH-05 disables channels out of their limits', () => {

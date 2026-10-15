@@ -46,7 +46,9 @@ describe('PR — parsing', () => {
       expect(() => parseByEndpoint(name)).not.toThrow();
     }
     expect(parseSession(body('session-cm-aggregate')).transaction.id).toBe('trx_PVrU8x2kQ1mNa7Lb3cDe');
-    expect(parseStatus(body('status-processing'))).toEqual({ reference: 'trx_test_PVrU8x2kQ1mNa7Lb3cDe', status: 'processing' });
+    // 2.1 always sends error_code and payer_message, null without a refusal.
+    expect(parseStatus(body('status-processing'))).toEqual({ reference: 'trx_test_PVrU8x2kQ1mNa7Lb3cDe', status: 'processing', payer_message: null });
+    expect(parseStatus(body('status-pending-attempt-refused'))).toMatchObject({ status: 'pending', error_code: 'insufficient_funds' });
     expect(parseStepVerify(body('otp-verify-invalid'))).toMatchObject({ status: 'failed', attempts_remaining: 2, error: { code: 'invalid_otp' } });
     expect(parseProcess(body('process-requires-otp'))).toMatchObject({ action: 'confirm_otp', otp_id: 'prc_7hQm2LxV9pR4sT1wYb3N' });
     expect(parseCancel(body('cancel-200')).redirect_url).toMatch(/status=cancelled/);
@@ -177,8 +179,13 @@ describe('PR — parsing', () => {
     const branding = parseSession(body('session-cm-aggregate')).parsedBranding!;
     expect(branding.white_label).toBe(true);
     expect(branding.overlay_intensity).toBe(40);
+    // 2.1: integers whatever the branding's source.
     expect(branding.font_weight_heading).toBe(600);
     expect(branding.font_weight_body).toBe(400);
+    // 2.0 sent the dashboard's string for one of them.
+    for (const name of ['session-payer-bears-fee', 'session-saved-methods']) {
+      expect([name, parseSession(body(name)).parsedBranding?.font_weight_body]).toEqual([name, 400]);
+    }
     expect(branding.primary_color).toBe('#0F766E');
     expect(parseSession(body('session-ci-xof-wallets')).parsedBranding?.business_name).toBe('Maquis Plateau');
 
@@ -198,7 +205,7 @@ describe('PR — parsing', () => {
     expect(session.channels[0]['name.fr']).toBe('Carte bancaire');
     expect(session.parsedBranding?.['card.background_color']).toBe('#FFFFFF');
     expect(session.parsedBranding?.['card.border_color']).toBe('#E5E7EB');
-    expect(parseSession(body('session-sandbox-cm')).channels[2]).toMatchObject({ name: 'Card', 'name.fr': 'Carte bancaire' });
+    expect(parseSession(body('session-sandbox-cm')).channels.find((c) => c.slug === 'card')).toMatchObject({ name: 'Card', 'name.fr': 'Carte bancaire' });
   });
 
   it('PR-07 accepts null optionals', () => {
@@ -211,8 +218,14 @@ describe('PR — parsing', () => {
     expect(wallets.locale).toBeUndefined();
 
     const sandbox = parseSession(body('session-sandbox-cm'));
-    expect(sandbox.echo?.key).toBe('');
     expect(sandbox.altcha).toBeNull();
+    // 2.1 leaves `echo` out without a key; 2.0 sent it with `key: null`.
+    expect(sandbox.echo).toBeUndefined();
+    expect(parseSession(body('session-processing-mobile-money')).echo?.key).toBe('');
+    // 2.1's `transaction.error_code`, null without a refusal; absent from a 2.0 answer.
+    expect(parseSession(body('session-cm-aggregate')).transaction.error_code).toBeNull();
+    expect(parseSession(body('session-pending-after-refusal')).transaction.error_code).toBe('insufficient_funds');
+    expect(parseSession(body('session-ci-xof-wallets')).transaction).not.toHaveProperty('error_code');
   });
 
   it('PR-08 accepts absent optional objects', () => {

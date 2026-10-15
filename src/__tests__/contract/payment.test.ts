@@ -233,7 +233,8 @@ describe('PA — process answers', () => {
     // An Orange number on cm.mtn (sandbox lets it through): the API's English
     // refusal becomes the SDK's own words.
     const operators = body('session-sandbox-cm');
-    operators.channels = ['mtn', 'orange'].map((op) => ({ ...operators.channels[0], id: `cm.${op}`, slug: `cm.${op}`, logo: null }));
+    const single = operators.channels.find((c: { slug: string }) => c.slug === 'cm.eu');
+    operators.channels = ['mtn', 'orange'].map((op) => ({ ...single, id: `cm.${op}`, slug: `cm.${op}`, logo: null, logo_png: null }));
     const mismatch = await sheet(
       { 'GET /pay/session': { status: 200, body: operators }, 'GET /pay/sdk-config': 'sdk-config-sandbox', 'POST /pay/process': 'process-422-operator-mismatch' },
       { locale: 'en' },

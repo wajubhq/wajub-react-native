@@ -254,11 +254,11 @@ export function BrandBadge({ operator, name, size = 40 }: { operator: string; na
   );
 }
 
-/** The operator's logo (https only), else — missing or failing to load — its brand badge. */
+/** The operator's logo (https only, never an SVG), else — missing or failing to load — its brand badge. */
 export function OperatorLogo({ operator, name, logo, size = 40 }: { operator: string; name: string; logo: string | null; size?: number }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [logo]);
-  if (!logo || !/^https:\/\//i.test(logo) || failed) return <BrandBadge operator={operator} name={name} size={size} />;
+  if (!logo || !/^https:\/\//i.test(logo) || /\.svgz?(?:[?#]|$)/i.test(logo) || failed) return <BrandBadge operator={operator} name={name} size={size} />;
   return (
     <View style={{ width: size, height: size, borderRadius: 8, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center', padding: 4 }}>
       <Image

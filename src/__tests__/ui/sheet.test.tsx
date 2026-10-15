@@ -8,7 +8,7 @@ import { PayClient } from '../../client/payClient';
 import { PaymentSheet, usePayment } from '../../usePayment';
 import { WajubSession } from '../../WajubSession';
 import { CheckoutSheet } from '../../ui/CheckoutSheet';
-import { fakeApi } from '../../test/fakeApi';
+import { body, fakeApi } from '../../test/fakeApi';
 import type { Answer, FakeApi } from '../../test/fakeApi';
 import type { CheckoutResult, PresentOptions } from '../../types';
 import type { WajubError } from '../../WajubError';
@@ -116,13 +116,36 @@ describe('UI — payment sheet', () => {
     expect(screen.getByTestId('wajub-badge-moov', hidden)).toBeTruthy();
     expect(screen.getByText('Moov', hidden)).toBeTruthy();
     expect(screen.getByTestId('wajub-operator-moov').props.accessibilityLabel).toBe('Moov Money');
-    // MTN's logo fails to load: its badge instead.
-    expect(screen.queryByTestId('wajub-badge-mtn', hidden)).toBeNull();
-    await act(async () => {
-      fireEvent(screen.getByTestId('wajub-logo-mtn', hidden), 'error', { nativeEvent: { error: 'unreachable' } });
-    });
+    // MTN's logo is an SVG, which the sheet cannot draw, and there is no PNG: its badge.
+    expect(screen.queryByTestId('wajub-logo-mtn', hidden)).toBeNull();
     expect(screen.getByTestId('wajub-badge-mtn', hidden)).toBeTruthy();
     expect(screen.getByText('MoMo', hidden)).toBeTruthy();
+    await act(async () => controller.hostGone());
+  });
+
+  it('CH-06 prefers logo_png where SVG cannot be drawn', async () => {
+    const controller = await show({ locale: 'en' }, routes());
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    const hidden = { includeHiddenElements: true };
+    const session = body('session-cm-aggregate');
+    const aggregate = session.channels.find((c: { slug: string }) => c.slug === 'cm.mobile');
+    // The method list: Mobile Money's PNG; card has an SVG only — its badge.
+    expect(screen.getByTestId('wajub-logo-mobile_money', hidden).props.source).toEqual({ uri: aggregate.logo_png });
+    expect(screen.queryByTestId('wajub-logo-card', hidden)).toBeNull();
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
+    });
+    // Each operator's PNG, never its SVG.
+    for (const operator of aggregate.operators) {
+      const image = screen.getByTestId(`wajub-logo-${operator.operator}`, hidden);
+      expect(image.props.source).toEqual({ uri: operator.logo_png });
+      expect(operator.logo).toMatch(/\.svg$/);
+    }
+    // A PNG that fails to load: the brand badge.
+    await act(async () => {
+      fireEvent(screen.getByTestId('wajub-logo-orange', hidden), 'error', { nativeEvent: { error: 'unreachable' } });
+    });
+    expect(screen.getByTestId('wajub-badge-orange', hidden)).toBeTruthy();
     await act(async () => controller.hostGone());
   });
 

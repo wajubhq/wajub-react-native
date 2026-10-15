@@ -179,6 +179,11 @@ export interface SessionTransaction {
   updated_at?: string | null;
   terminal_at?: string | null;
   processing_context?: ProcessingContext | null;
+  /**
+   * The refusal that put the payment back at `pending` (its code), `null`
+   * when there is none. Absent from older answers.
+   */
+  error_code?: string | null;
 }
 
 /** One member of an aggregate channel (`cm.mobile` = cm.mtn + cm.orange). */
@@ -190,6 +195,8 @@ export interface ChannelOperator {
   /** In the session's locale. */
   name: string;
   logo: string | null;
+  /** The same logo as a PNG, where `logo` is an SVG; `null` or absent when there is none. */
+  logo_png?: string | null;
 }
 
 export interface SessionChannel {
@@ -203,6 +210,8 @@ export interface SessionChannel {
   name_fr?: string;
   type: string;
   logo?: string | null;
+  /** The same logo as a PNG, where `logo` is an SVG; `null` or absent when there is none. */
+  logo_png?: string | null;
   /** ISO-2, upper case. May be empty (card). */
   countries: string[];
   min_amount?: number;
@@ -336,14 +345,40 @@ export interface PaymentStatus {
   status: string;
   /** Only when an attempt was refused and the payment is back at `pending`. */
   error_code?: string;
+  /** The refusal's message for the payer; `null` without one. */
   payer_message?: string | null;
 }
 
 export type ConfirmStepKind = 'otp' | 'pin' | 'phone' | 'birthday' | 'address';
 
 /** POST /pay/{kind}/verify — HTTP 200 for both. */
+/**
+ * The next step a provider asks for after a confirmation step: `action` and
+ * its fields, as a payment's own answer carries them (`confirm_otp` with
+ * `otp_id` and `otp_masked_contact`, `redirect` with `confirm_url`, …).
+ */
+export interface StepFields {
+  action?: string;
+  confirm_url?: string;
+  three_ds_id?: string;
+  three_ds_method?: string;
+  masked_email?: string;
+  three_ds_timeout?: number;
+  otp_id?: string;
+  otp_masked_contact?: string;
+  pin_id?: string;
+  pin_instruction?: string;
+  phone_id?: string;
+  phone_instruction?: string;
+  birthday_id?: string;
+  birthday_instruction?: string;
+  address_id?: string;
+  address_instruction?: string;
+  client_session?: ClientSession;
+}
+
 export type StepVerifyResponse =
-  | { status: 'success'; transaction: SessionTransaction | null }
+  | ({ status: 'success'; transaction: SessionTransaction | null } & StepFields)
   | {
       status: 'failed';
       attempts_remaining: number | null;

@@ -18,6 +18,7 @@ const EXPECTED: Array<[string, string, string, boolean, string | null, string | 
   ['broadcasting-auth-403', 'merchant_restricted', 'payment_error', false, null, null, null, null],
   ['cancel-400-not-cancellable', 'not_processable', 'invalid_request_error', false, null, null, null, null],
   ['client-session-422-sandbox', 'client_session_unavailable', 'invalid_request_error', false, null, 'request', null, null],
+  ['client-session-422-security-check-failed', 'security_check_failed', 'invalid_request_error', true, null, 'request', null, null],
   ['client-session-complete-402', 'failed', 'payment_error', true, 'failed', null, null, null],
   ['client-session-complete-422-expired', 'client_session_expired', 'invalid_request_error', true, null, 'request', null, null],
   ['error-401-invalid-token', 'session_not_found', 'authentication_error', false, null, null, null, null],
@@ -39,6 +40,7 @@ const EXPECTED: Array<[string, string, string, boolean, string | null, string | 
   ['process-422-operator-mismatch', 'validation_error', 'invalid_request_error', true, null, 'phone', null, null],
   ['process-422-over-mobile-money-limit-sandbox', 'validation_error', 'invalid_request_error', true, null, 'request', null, null],
   ['process-422-raw-card-data-live', 'raw_card_data_not_accepted', 'invalid_request_error', false, null, 'card', null, null],
+  ['process-422-security-check-failed', 'security_check_failed', 'invalid_request_error', true, null, 'request', null, null],
   ['process-422-sandbox-invalid-test-number', 'validation_error', 'invalid_request_error', true, null, 'data.phone', null, null],
   ['process-422-unknown-channel', 'validation_error', 'invalid_request_error', true, null, 'channel', null, null],
   // Two fields at fault: no single param.

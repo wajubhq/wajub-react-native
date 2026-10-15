@@ -342,6 +342,9 @@ export class CheckoutController {
         // Its status decides what closing the sheet means from now on, before sdk-config is in.
         this.knownStatus = session.transaction.status.toLowerCase();
         this.transaction = session.transaction;
+        // The refusal left on the payment (null: none) is the watch's baseline: not this sheet's news.
+        // An older answer does not say: unknown.
+        if (session.transaction.error_code !== undefined) this.knownErrorCode = session.transaction.error_code;
         let config: SdkConfig | null | undefined;
         if (!payableAtLoad(session)) {
           // Paid, ended or under way: the session alone draws its screen (success, notice, restore
@@ -908,10 +911,12 @@ export class CheckoutController {
 
   /** 422: the form again, with its errors (README §9.1), or the Altcha retry (§15). */
   private async handleValidation(error: WajubError): Promise<void> {
-    // The API refuses a solution (or its absence) without an error_code: a malformed one under
-    // `data.altcha` (or `altcha`), a wrong or missing one only by its message — matched as a last resort.
+    // The API refuses a solution (or its absence) with `error_code: security_check_failed`. An older
+    // answer had no code: a malformed solution under `data.altcha` (or `altcha`), a wrong or missing
+    // one only by its message — matched as a last resort, and only then.
     const altchaField = Object.keys(error.details ?? {}).some((k) => k === 'altcha' || k === 'data.altcha');
-    if (altchaField || /security challenge/i.test(error.api_message ?? '')) {
+    const uncoded = error.code === 'validation_error' && (altchaField || /security challenge/i.test(error.api_message ?? ''));
+    if (error.code === 'security_check_failed' || uncoded) {
       if (this.altchaRetried) {
         this.fail(WajubError.create('security_check_failed', { lang: this.lang }));
         return;
@@ -1089,7 +1094,7 @@ export class CheckoutController {
       const status = error.http_status;
       if (status === 410) return this.end('expired', error.localized(this.lang));
       if (status === 401 || status === 403 || status === 404 || status === 429) return this.fail(error.localized(this.lang));
-      if (status === 422 && error.code === 'validation_error' && error.details) return this.handleValidation(error);
+      if (status === 422 && (error.code === 'security_check_failed' || (error.code === 'validation_error' && error.details))) return this.handleValidation(error);
       // Nothing was charged: say why on the form, the payer can pick another way.
       const banner = error.localized(this.lang);
       this.show(this.chosen ? { name: 'form', method: this.chosen } : this.snapshot.screen, 'COLLECTING_DETAILS', { banner });
@@ -1228,6 +1233,11 @@ export class CheckoutController {
       const answer = await this.client.verifyStep(this.token, step.kind, body);
       if (!this.onStep(step.id)) return;
       if (answer.status === 'success') {
+        if (answer.action) {
+          // The provider asks for another step, or its page: followed as a payment's own answer.
+          const { status: _status, transaction, ...next } = answer;
+          return this.handleAnswer({ code: 202, status: 'Accepted', message: '', ...next, ...(transaction ? { transaction } : {}) });
+        }
         if (answer.transaction) this.transaction = { ...this.transaction, ...answer.transaction };
         this.markStarted(answer.transaction?.status);
         const s = answer.transaction?.status ?? '';

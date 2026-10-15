@@ -87,15 +87,17 @@ describe('MM — Mobile Money', () => {
   it('MM-04 lists aggregate operators', () => {
     const cm = operatorChoices(parseSession(body('session-cm-aggregate')).channels, 'CM', 'fr');
     expect(cm).toEqual([
-      { id: 'mtn', channel: 'cm.mobile', viaAggregate: true, name: 'MTN Mobile Money', logo: 'https://assets.wajub.com/img/channels/momo.svg', label: 'MTN MoMo' },
-      { id: 'orange', channel: 'cm.mobile', viaAggregate: true, name: 'Orange Money', logo: 'https://assets.wajub.com/img/channels/om.svg', label: 'Orange Money' },
+      // The image the sheet can draw: the operator's PNG (CH-06).
+      { id: 'mtn', channel: 'cm.mobile', viaAggregate: true, name: 'MTN Mobile Money', logo: 'https://api.wajub.com/img/channels/momo.png', label: 'MTN MoMo' },
+      { id: 'orange', channel: 'cm.mobile', viaAggregate: true, name: 'Orange Money', logo: 'https://api.wajub.com/img/channels/om.png', label: 'Orange Money' },
     ]);
+    // SVG logos without a PNG (a 2.0 answer): none the sheet can draw — brand badges.
     const ci = operatorChoices(parseSession(body('session-ci-xof-wallets')).channels, 'CI', 'en');
     expect(ci.map((c) => [c.id, c.channel, c.viaAggregate, c.logo])).toEqual([
-      ['mtn', 'ci.mtn', false, 'https://assets.wajub.com/img/channels/ci-mtn.svg'],
+      ['mtn', 'ci.mtn', false, null],
       ['moov', 'ci.moov', false, null],
-      ['orange', 'ci.orange', false, 'https://assets.wajub.com/img/channels/ci-orange.svg'],
-      ['wave', 'ci.wave', false, 'https://assets.wajub.com/img/channels/wave.svg'],
+      ['orange', 'ci.orange', false, null],
+      ['wave', 'ci.wave', false, null],
     ]);
   });
 
@@ -409,6 +411,66 @@ describe('AL — Altcha', () => {
     expect(after[1].body.data.altcha.challenge).not.toBe(after[0].body.data.altcha.challenge);
     expect(failing.controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
     failing.controller.hostGone();
+  });
+
+  it('AL-02 recognises the altcha refusal by its code', async () => {
+    const salt = 'a1b2c3d4e5?expires=1760434200';
+    const withChallenge = (n: number) => {
+      const raw = body('session-cm-aggregate');
+      raw.altcha = { algorithm: 'SHA-256', challenge: sha256Hex(`${salt}${n}`), salt, signature: `SIG-${n}`, maxnumber: 10_000 };
+      return { status: 200, body: raw };
+    };
+    const refusal = 'process-422-security-check-failed';
+
+    // Refused once: the session read again for a new challenge, solved, sent again under a new key.
+    const once = await sheet([withChallenge(31), withChallenge(32)], [refusal, 'process-processing-mobile-money-live']);
+    const mtn = operatorChoices(once.controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+    await once.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+    await settle(30);
+    const calls = api.callsTo('POST /pay/process');
+    expect(calls.map((c) => c.body.data.altcha.number)).toEqual([31, 32]);
+    expect(calls[1].headers['Idempotency-Key']).not.toBe(calls[0].headers['Idempotency-Key']);
+    expect(once.controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    expect(once.onError).not.toHaveBeenCalled();
+    once.controller.hostGone();
+    api.restore();
+
+    // Refused twice: security_check_failed, retryable — not field errors.
+    const twice = await sheet([withChallenge(33), withChallenge(34)], [refusal, refusal]);
+    await twice.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+    await settle(30);
+    expect(api.callsTo('POST /pay/process')).toHaveLength(2);
+    expect(twice.controller.getSnapshot()).toMatchObject({ fieldErrors: {}, screen: { name: 'failed', error: { code: 'security_check_failed', retryable: true } } });
+    twice.controller.hostGone();
+    api.restore();
+
+    // The same refusal from /pay/client-session.
+    api = fakeApi({
+      'GET /pay/session': [withChallenge(35), withChallenge(36)],
+      'GET /pay/sdk-config': 'sdk-config-card-paystack',
+      'POST /pay/client-session': ['client-session-422-security-check-failed', 'client-session-start-202'],
+      'GET /pay/status': 'status-processing',
+    });
+    const card = makeController();
+    card.controller.start();
+    await settle();
+    card.controller.chooseMethod('card');
+    await card.controller.payCard({ email: 'chidi.okafor@example.com' });
+    await settle(30);
+    expect(api.callsTo('POST /pay/client-session').map((c) => c.body.altcha.number)).toEqual([35, 36]);
+    expect(card.controller.getSnapshot().state).toBe('PENDING');
+    card.controller.hostGone();
+    api.restore();
+
+    // Another 422 with the Altcha message but a code of its own is not an Altcha refusal.
+    const other = { status: 422, body: { ...body(refusal), error_code: 'invalid_phone', errors: { 'data.phone': ['Security challenge verification failed.'] } } };
+    const notAltcha = await sheet([withChallenge(37)], [other]);
+    await notAltcha.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+    await settle(30);
+    expect(api.callsTo('POST /pay/process')).toHaveLength(1);
+    expect(api.callsTo('GET /pay/session')).toHaveLength(2);
+    expect(notAltcha.controller.getSnapshot().screen.name).not.toBe('failed');
+    notAltcha.controller.hostGone();
   });
 
   it('AL-01 recognises an Altcha refusal when no solution was sent', async () => {
