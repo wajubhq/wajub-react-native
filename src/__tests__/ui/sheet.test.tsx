@@ -320,6 +320,26 @@ describe('UI — payment sheet', () => {
     expect(screen.getByTestId('wajub-operator-mtn').props.accessibilityState).toMatchObject({ selected: false });
   });
 
+  it('MM-01 reads a number typed with Arabic-Indic digits', async () => {
+    await show({ locale: 'en' }, routes({ 'POST /pay/process': 'process-processing-mobile-money-live' }));
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
+    });
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-phone'), '٦٩١٢٣٤٥٦٧');
+    });
+    // Shown as the digits read, its operator detected, and sent.
+    expect(screen.getByTestId('wajub-phone').props.value).toBe('69 12 34 56 7');
+    expect(screen.getByTestId('wajub-operator-orange').props.accessibilityState).toMatchObject({ selected: true });
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-pay'));
+    });
+    await waitFor(() => expect(api.callsTo('POST /pay/process')).toHaveLength(1));
+    expect(api.callsTo('POST /pay/process')[0].body.data.phone).toBe('+237691234567');
+    expect(screen.queryByTestId('wajub-phone-error')).toBeNull();
+  });
+
   it('draws the Mobile Money form, detection and the approval screen', async () => {
     const controller = await show(
       { locale: 'fr' },

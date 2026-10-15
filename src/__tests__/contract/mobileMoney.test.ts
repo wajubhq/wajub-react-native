@@ -57,6 +57,12 @@ describe('MM — Mobile Money', () => {
       expect([v.input, toE164(v.input, v.country)]).toEqual([v.input, v.e164]);
       expect([v.input, formatAsYouType(v.input)]).toEqual([v.input, v.formatted]);
     }
+    // Arabic-Indic and Persian keyboards type other digits: the same number is read.
+    expect(nationalDigits('٦٧٧ ١٢ ٣٤ ٥٦', 'CM')).toBe('677123456');
+    expect(isValidNumber('٦٧٧١٢٣٤٥٦', 'CM')).toBe(true);
+    expect(detectOperator('٦٧٧١٢٣٤٥٦', 'CM')).toBe('mtn');
+    expect(toE164('۰۷ ۱۲ ۳۴ ۵۶ ۷۸', 'CI')).toBe('+2250712345678');
+    expect(formatAsYouType('+٢٣٧ ٦٧٧١٢٣٤٥٦')).toBe('23 76 77 12 34 56');
     // A country outside the tables keeps an international number valid E.164.
     expect(toE164('+33612345678', 'FR')).toBe('+33612345678');
     expect(toE164('0033 6 12 34 56 78', 'FR')).toBe('+33612345678');

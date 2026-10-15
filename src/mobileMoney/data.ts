@@ -83,9 +83,26 @@ export function countryRules(country: string): CountryRules | undefined {
   return mobileMoneyData().countries[country.toUpperCase()];
 }
 
-/** Keep 0-9 and '+', then drop every '+'. */
+/**
+ * The first digit (0) of the decimal digit sets a phone keyboard may type
+ * besides ASCII: Arabic-Indic (Egypt, Morocco…), Persian, N'Ko, full-width.
+ */
+const DIGIT_ZEROS = [0x0660, 0x06f0, 0x07c0, 0xff10];
+
+/** Other decimal digits as ASCII ones ('٦٧٧' → '677'): the number typed is the number read. */
+export function toAsciiDigits(input: string): string {
+  let out = '';
+  for (const ch of input) {
+    const code = ch.charCodeAt(0);
+    const zero = DIGIT_ZEROS.find((z) => code >= z && code <= z + 9);
+    out += zero === undefined ? ch : String(code - zero);
+  }
+  return out;
+}
+
+/** Other decimal digits read as ASCII; keep 0-9 and '+', then drop every '+'. */
 export function sanitize(input: string): string {
-  return input.replace(/[^0-9+]/g, '').replace(/\+/g, '');
+  return toAsciiDigits(input).replace(/[^0-9+]/g, '').replace(/\+/g, '');
 }
 
 const dialDigits = (rules: CountryRules | undefined) => rules?.dial_code.replace('+', '') ?? '';
