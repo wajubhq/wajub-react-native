@@ -6,7 +6,7 @@ import { WajubError } from '../../WajubError';
 import { makeController } from '../../test/checkout';
 import { body, fakeApi, fixture, settle } from '../../test/fakeApi';
 import { sha256Hex } from '../../crypto';
-import type { FakeApi } from '../../test/fakeApi';
+import type { Answer, FakeApi } from '../../test/fakeApi';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const instant = { sleep: async () => undefined };
@@ -100,6 +100,26 @@ describe('TR — transport', () => {
     const fingerprints = api.callsTo('POST /pay/process').map((c) => c.body.data._client.fingerprint);
     const { installFingerprint } = require('../../client/device') as typeof import('../../client/device');
     expect(fingerprints).toEqual([await installFingerprint(adapter), await installFingerprint(adapter)]);
+
+    // A read that fails (a busy database): an id for this run only — the stored one is never written over.
+    const kept = new Map<string, string>([['@wajub/install-id', 'original-id']]);
+    let failNext = true;
+    const flaky: WajubStorage = {
+      getItem: jest.fn(async (key: string) => {
+        if (failNext) {
+          failNext = false;
+          throw new Error('SQLITE_BUSY');
+        }
+        return kept.get(key) ?? null;
+      }),
+      setItem: jest.fn(async (key: string, value: string) => void kept.set(key, value)),
+    };
+    const thisRun = await load(flaky);
+    expect(thisRun).not.toBe(sha256Hex('device:original-id'));
+    expect(flaky.setItem).not.toHaveBeenCalled();
+    expect(kept.get('@wajub/install-id')).toBe('original-id');
+    // The next run reads it again: the install's own fingerprint.
+    expect(await load(flaky)).toBe(sha256Hex('device:original-id'));
   });
 
   it('TR-05 applies per-call timeouts', async () => {
@@ -279,8 +299,135 @@ describe('TR — transport', () => {
     await pay(back.controller);
     const retried = api.callsTo('POST /pay/process');
     expect(retried[retried.length - 1].headers['Idempotency-Key']).toBe(key);
-    // And a Pay after that gets a key of its own.
+    expect(back.controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+
+    // And a Pay after that gets a key of its own: the replay was an answer.
+    // Here the payment is back at `pending` after it was seen processing: refused.
+    await jest.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(back.controller.getSnapshot().screen.name).toBe('failed');
+    back.controller.tryAgain();
+    api.answer('POST /pay/process', 'process-processing-mobile-money-live');
+    await pay(back.controller);
+    const keys = api.callsTo('POST /pay/process').map((c) => c.headers['Idempotency-Key']);
+    expect(keys[keys.length - 1]).not.toBe(key);
+    expect(keys.filter((k) => k === keys[keys.length - 1])).toHaveLength(1);
     back.controller.hostGone();
+  });
+
+  it('TR-09 applies the 60 s rule to 5xx answers, a 500 included', async () => {
+    jest.useFakeTimers();
+    const processing = body('status-processing');
+    const pending = { status: 200, body: { ...processing, transaction: { ...processing.transaction, status: 'pending' } } };
+    const choice = { id: 'mtn', channel: 'cm.mobile', viaAggregate: true, name: 'MTN', logo: null, label: 'MTN MoMo' };
+    for (const [answer, tries] of [
+      ['error-500-production', 1],
+      [{ status: 502 }, 3],
+      [{ status: 503 }, 3],
+      [{ status: 504 }, 3],
+    ] as Array<[Answer, number]>) {
+      api = fakeApi({
+        'GET /pay/session': 'session-cm-aggregate',
+        'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+        'POST /pay/process': answer,
+        'GET /pay/status': pending,
+      });
+      const onError = jest.fn();
+      const { controller } = makeController({ onError, locale: 'en' });
+      controller.start();
+      await settle();
+      controller.chooseMethod('mobile_money');
+      await controller.payMobileMoney({ phone: '677123456', country: 'CM', choice, pickedByHand: true });
+      await settle();
+      // A 500 is not retried, a 502–504 is; either way the outcome is unknown: PENDING, no failure.
+      expect(api.callsTo('POST /pay/process')).toHaveLength(tries);
+      expect(controller.getSnapshot().state).toBe('PENDING');
+      expect(onError).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', banner: { code: 'network_error', retryable: true } });
+      const key = api.callsTo('POST /pay/process')[0].headers['Idempotency-Key'];
+      api.answer('POST /pay/process', 'process-idempotent-replay');
+      await controller.payMobileMoney({ phone: '677123456', country: 'CM', choice, pickedByHand: true });
+      await settle();
+      const calls = api.callsTo('POST /pay/process');
+      expect(calls[calls.length - 1].headers['Idempotency-Key']).toBe(key);
+      controller.hostGone();
+      api.restore();
+    }
+  });
+
+  it('TR-09 a decline the payment already carried does not hold the 60 s rule; a new one fails the attempt', async () => {
+    jest.useFakeTimers();
+    const processing = body('status-processing');
+    const pendingWith = (code: string) => ({
+      status: 200,
+      body: { ...processing, transaction: { ...processing.transaction, status: 'pending', error_code: code, payer_message: 'Not enough money.' } },
+    });
+    const pay = async (controller: ReturnType<typeof makeController>['controller']) => {
+      const choice = { id: 'mtn', channel: 'cm.mobile', viaAggregate: true, name: 'MTN', logo: null, label: 'MTN MoMo' };
+      await controller.payMobileMoney({ phone: '677123456', country: 'CM', choice, pickedByHand: true });
+      await settle();
+    };
+
+    // The status carries the decline of an earlier try, from before this sheet: the 60 s rule still applies.
+    api = fakeApi({
+      'GET /pay/session': 'session-cm-aggregate',
+      'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+      'POST /pay/process': 'network',
+      'GET /pay/status': pendingWith('insufficient_funds'),
+    });
+    const leftover = makeController({ locale: 'en' });
+    leftover.controller.start();
+    await settle();
+    leftover.controller.chooseMethod('mobile_money');
+    await pay(leftover.controller);
+    expect(leftover.controller.getSnapshot().state).toBe('PENDING');
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(leftover.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', banner: { code: 'network_error' } });
+    leftover.controller.hostGone();
+    api.restore();
+
+    // This sheet saw one decline; the status then shows another code: this attempt was refused.
+    api = fakeApi({
+      'GET /pay/session': 'session-cm-aggregate',
+      'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+      'POST /pay/process': ['process-402-insufficient-funds-sandbox', 'network'],
+      'GET /pay/status': pendingWith('transaction_limit_exceeded'),
+    });
+    const fresh = makeController({ locale: 'en' });
+    fresh.controller.start();
+    await settle();
+    fresh.controller.chooseMethod('mobile_money');
+    await pay(fresh.controller);
+    expect(fresh.controller.getSnapshot().screen.name).toBe('failed');
+    fresh.controller.tryAgain();
+    await pay(fresh.controller);
+    expect(fresh.controller.getSnapshot().state).toBe('PENDING');
+    await jest.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(fresh.controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { retryable: true } });
+    fresh.controller.hostGone();
+    api.restore();
+
+    // The same code as the decline this sheet saw: an earlier try's, the 60 s rule applies.
+    api = fakeApi({
+      'GET /pay/session': 'session-cm-aggregate',
+      'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+      'POST /pay/process': ['process-402-insufficient-funds-sandbox', 'network'],
+      'GET /pay/status': pendingWith('insufficient_funds'),
+    });
+    const same = makeController({ locale: 'en' });
+    same.controller.start();
+    await settle();
+    same.controller.chooseMethod('mobile_money');
+    await pay(same.controller);
+    same.controller.tryAgain();
+    await pay(same.controller);
+    await jest.advanceTimersByTimeAsync(55_000);
+    expect(same.controller.getSnapshot().state).toBe('PENDING');
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(same.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', banner: { code: 'network_error' } });
+    same.controller.hostGone();
   });
 
   it('TR-10 defaults to the production api', async () => {

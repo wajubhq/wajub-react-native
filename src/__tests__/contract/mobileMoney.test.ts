@@ -32,7 +32,7 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
-async function sheet(session: Answer, process: Answer | Answer[], options = {}) {
+async function sheet(session: Answer | Answer[], process: Answer | Answer[], options = {}) {
   api = fakeApi({
     'GET /pay/session': session,
     'GET /pay/sdk-config': 'sdk-config-cm-stripe',
@@ -273,5 +273,158 @@ describe('AL — Altcha', () => {
     await settle();
     await expect(closing.controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
     expect(api.callsTo('POST /pay/process')).toHaveLength(0);
+    // Pay was pressed: the attempt is undecided from then on, nothing is cancelled (README §14).
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+  });
+
+  /**
+   * An Altcha server: every session read issues a challenge of its own, and
+   * /pay/process takes one solution once, for a challenge it issued.
+   */
+  function altchaServer(process: Answer[], options: { altcha?: boolean } = {}) {
+    const salt = 'a1b2c3d4e5?expires=1760434200';
+    let next = 11;
+    let altcha = options.altcha ?? true;
+    const issued = new Set<string>();
+    const used = new Set<string>();
+    const refused = {
+      status: 422,
+      body: {
+        code: 422,
+        status: 'Unprocessable Entity',
+        message: 'Security challenge verification failed. Please refresh the page and try again.',
+        errors: { request: ['Security challenge verification failed. Please refresh the page and try again.'] },
+      },
+    };
+    const sessionRead: Answer = () => {
+      const raw = body('session-cm-aggregate');
+      if (altcha) {
+        const n = next++;
+        raw.altcha = { algorithm: 'SHA-256', challenge: sha256Hex(`${salt}${n}`), salt, signature: `SIG-${n}`, maxnumber: 10_000 };
+        issued.add(raw.altcha.challenge);
+      }
+      return { status: 200, body: raw };
+    };
+    const answers = [...process];
+    const processCall: Answer = (call) => {
+      if (altcha) {
+        const solution = call.body.data.altcha;
+        const valid =
+          solution &&
+          issued.has(solution.challenge) &&
+          !used.has(solution.challenge) &&
+          sha256Hex(`${solution.salt}${solution.number}`) === solution.challenge;
+        if (!valid) return refused;
+        used.add(solution.challenge);
+      }
+      return answers.length > 1 ? answers.shift()! : answers[0];
+    };
+    return {
+      sessionRead,
+      processCall,
+      issued,
+      used,
+      turnOn: () => {
+        altcha = true;
+      },
+    };
+  }
+  const decline = 'process-402-insufficient-funds-sandbox';
+
+  it('AL-01 sends each challenge once, and nothing without a solution', async () => {
+    // Declined twice, then accepted: three attempts, three challenges, each issued for it.
+    const server = altchaServer([decline, decline, 'process-processing-mobile-money-live']);
+    const { controller } = await sheet(server.sessionRead, server.processCall);
+    const mtn = operatorChoices(controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+    for (let i = 0; i < 3; i++) {
+      if (i > 0) controller.tryAgain();
+      await controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+      await settle(30);
+    }
+    const sent = api.callsTo('POST /pay/process').map((c) => c.body.data.altcha?.challenge);
+    expect(sent).toHaveLength(3);
+    expect(sent.every((challenge) => server.issued.has(challenge))).toBe(true);
+    expect(new Set(sent).size).toBe(3);
+    expect(server.used.size).toBe(3);
+    expect(controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    controller.hostGone();
+    api.restore();
+
+    // Pay again before the next challenge is back: the request waits for it.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const slow = altchaServer([decline, 'process-processing-mobile-money-live']);
+    let reads = 0;
+    const second = await sheet(
+      (call) => {
+        reads += 1;
+        return slow.sessionRead(call);
+      },
+      slow.processCall,
+    );
+    const realFetch = api.fetch.getMockImplementation()!;
+    api.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/pay/session') && reads >= 1) await held;
+      return realFetch(url, init);
+    });
+    await second.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+    await settle(30);
+    expect(second.controller.getSnapshot().screen.name).toBe('failed');
+    second.controller.tryAgain();
+    const paying = second.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+    await settle(30);
+    expect(api.callsTo('POST /pay/process')).toHaveLength(1);
+    expect(second.controller.getSnapshot()).toMatchObject({ state: 'PROCESSING', busy: true });
+    release();
+    await paying;
+    await settle(30);
+    const challenges = api.callsTo('POST /pay/process').map((c) => c.body.data.altcha?.challenge);
+    expect(challenges).toHaveLength(2);
+    expect(challenges[1]).toBeDefined();
+    expect(challenges[1]).not.toBe(challenges[0]);
+    expect(second.controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    second.controller.hostGone();
+    api.restore();
+
+    // The next challenge cannot be had: nothing is sent, the form says so; the next Pay asks again.
+    const down = altchaServer([decline, 'process-processing-mobile-money-live']);
+    // Four tries for the one fetched ahead after the first Pay, four more when the second Pay asks again.
+    const unavailable: Answer[] = Array.from({ length: 8 }, () => ({ status: 503 }));
+    const failing = await sheet([down.sessionRead, ...unavailable, down.sessionRead], down.processCall);
+    await failing.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+    await settle(30);
+    failing.controller.tryAgain();
+    await failing.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+    await settle(30);
+    expect(api.callsTo('POST /pay/process')).toHaveLength(1);
+    expect(failing.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', busy: false, banner: { retryable: true } });
+    expect(failing.onError).toHaveBeenLastCalledWith(expect.objectContaining({ retryable: true }));
+    expect(api.callsTo('GET /pay/session')).toHaveLength(9);
+    await failing.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+    await settle(30);
+    const after = api.callsTo('POST /pay/process');
+    expect(after).toHaveLength(2);
+    expect(after.every((c) => c.body.data.altcha && down.issued.has(c.body.data.altcha.challenge))).toBe(true);
+    expect(after[1].body.data.altcha.challenge).not.toBe(after[0].body.data.altcha.challenge);
+    expect(failing.controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    failing.controller.hostGone();
+  });
+
+  it('AL-01 recognises an Altcha refusal when no solution was sent', async () => {
+    // The session had no challenge; the API asks for one anyway.
+    const server = altchaServer(['process-processing-mobile-money-live'], { altcha: false });
+    const { controller } = await sheet(server.sessionRead, server.processCall);
+    server.turnOn();
+    const mtn = operatorChoices(controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+    await controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+    await settle(30);
+    const calls = api.callsTo('POST /pay/process');
+    expect(calls).toHaveLength(2);
+    expect(calls[0].body.data.altcha).toBeUndefined();
+    expect(server.issued.has(calls[1].body.data.altcha.challenge)).toBe(true);
+    // A new request after a definitive answer: a key of its own.
+    expect(calls[1].headers['Idempotency-Key']).not.toBe(calls[0].headers['Idempotency-Key']);
+    expect(controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    controller.hostGone();
   });
 });

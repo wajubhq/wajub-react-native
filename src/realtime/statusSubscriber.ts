@@ -13,8 +13,10 @@ const ENDED = ['failed', 'cancelled', 'expired'];
  * session is read right away and then on a schedule (`intervalMs`, slower
  * after two minutes without a change, 15 s while the realtime socket is up,
  * backing off on errors), next to the payment's private realtime channel.
- * `onUpdate` gets `mapStatusToResult()` of each new status; a final one
- * stops the watch. There is no time limit: it runs until a final status, or
+ * `onUpdate` gets `mapStatusToResult()` of each status read, as 1.4 did:
+ * every poll when the session has no realtime channel (`echo`), and only a
+ * status that changed when it has one, the socket and the polls telling the
+ * same news. A final status stops the watch. There is no time limit: it runs until a final status, or
  * until the returned function is called. An ended session (`401`, `403`,
  * `404`, `410`) stops it too, with a `failed` result carrying that error —
  * 1.4 kept polling it forever.
@@ -27,9 +29,11 @@ export function subscribeStatus(
   intervalMs: number = POLLING.intervalMs,
   realtime?: PresentOptions['realtime'],
 ): () => void {
+  // 1.4 told every poll when it only polled, and each change once with a socket beside the polls.
+  const dedup = Boolean(session.echo);
   let last: PaymentResult['status'] | null = null;
   const deliver = (result: PaymentResult) => {
-    if (result.status === last) return;
+    if (dedup && result.status === last) return;
     last = result.status;
     onUpdate(result);
   };

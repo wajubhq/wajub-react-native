@@ -36,8 +36,13 @@ async function sheet(routes: Record<string, Answer | Answer[]>, options: Partial
 }
 
 /** The CM sheet, Mobile Money chosen, MTN paying `process`. */
-async function payMtn(process: Answer | Answer[], options: Partial<PresentOptions> = {}, session: Answer = 'session-cm-aggregate') {
-  const s = await sheet({ 'GET /pay/session': session, 'GET /pay/sdk-config': 'sdk-config-cm-stripe', 'POST /pay/process': process }, options);
+async function payMtn(
+  process: Answer | Answer[],
+  options: Partial<PresentOptions> = {},
+  session: Answer = 'session-cm-aggregate',
+  routes: Record<string, Answer | Answer[]> = {},
+) {
+  const s = await sheet({ 'GET /pay/session': session, 'GET /pay/sdk-config': 'sdk-config-cm-stripe', 'POST /pay/process': process, ...routes }, options);
   s.controller.chooseMethod('mobile_money');
   const mtn = operatorChoices(s.controller.getSnapshot().session!.channels, 'CM', 'en')[0];
   await s.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
@@ -342,6 +347,51 @@ describe('PA — process answers', () => {
     stuck.controller.hostGone();
     api.restore();
 
+    // 400 and a status that cannot be read (after its retries, or without a status): PENDING, watched.
+    jest.useFakeTimers();
+    for (const unreadable of ['network', { status: 200, body: { transaction: { reference: 'trx_PVrU8x2kQ1mNa7Lb3cDe' } } }] as Answer[]) {
+      const unknown = await payMtn('process-400-not-processable', {}, 'session-cm-aggregate', { 'GET /pay/status': unreadable });
+      expect(unknown.controller.getSnapshot()).toMatchObject({ state: 'PENDING', screen: { name: 'pending' }, busy: false, canCancel: false });
+      expect(unknown.onError).not.toHaveBeenCalled();
+      // The watch reads it `pending`: what the re-read would have said — not_processable.
+      api.answer('GET /pay/status', { status: 200, body: { transaction: { reference: 'trx_PVrU8x2kQ1mNa7Lb3cDe', status: 'pending' } } });
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(unknown.controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { code: 'not_processable' } });
+      unknown.controller.hostGone();
+      api.restore();
+    }
+    // Unreadable, then `processing`, then paid: the watch decides.
+    const later = await payMtn('process-400-not-processable', {}, 'session-cm-aggregate', { 'GET /pay/status': ['network', 'network', 'network', 'network', 'status-processing', 'status-succeeded'] });
+    expect(later.controller.getSnapshot().state).toBe('PENDING');
+    await jest.advanceTimersByTimeAsync(15_000);
+    expect(later.controller.getSnapshot().state).toBe('SUCCESS');
+    later.controller.hostGone();
+    api.restore();
+    jest.useRealTimers();
+
+    // Closed while the status is re-read: the attempt is in flight — processing, and the late answer changes nothing.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const closing = await sheet({ 'GET /pay/session': 'session-cm-aggregate', 'GET /pay/sdk-config': 'sdk-config-cm-stripe', 'POST /pay/process': 'process-400-not-processable', 'GET /pay/status': 'status-succeeded' });
+    const fetchFirst = api.fetch.getMockImplementation()!;
+    api.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/pay/status')) await held;
+      return fetchFirst(url, init);
+    });
+    closing.controller.chooseMethod('mobile_money');
+    const choiceClosing = operatorChoices(closing.controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+    const payingClosing = closing.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: choiceClosing, pickedByHand: true });
+    await settle();
+    expect(closing.controller.getSnapshot()).toMatchObject({ busy: true, canCancel: false });
+    closing.controller.dismiss();
+    release();
+    await payingClosing;
+    await settle();
+    await expect(closing.controller.result).resolves.toMatchObject({ status: 'processing' });
+    expect(closing.onSuccess).not.toHaveBeenCalled();
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+    api.restore();
+
     const ended = await payMtn('error-410-process-session-ended');
     expect(ended.controller.getSnapshot()).toMatchObject({ state: 'EXPIRED', screen: { name: 'expired', error: { code: 'session_terminal_expired' } } });
     ended.controller.hostGone();
@@ -500,6 +550,64 @@ describe('CS — client sessions', () => {
     expect(first.restart).toBeUndefined();
     expect(second.restart).toBe(true);
     expired.controller.hostGone();
+  });
+
+  it('CS-02 lets the PSP answer decide over a refusal a poll reads meanwhile', async () => {
+    const processing = body('status-processing');
+    // An earlier refused try left its error_code on the payment: a poll reads `pending` with it.
+    const refusedBefore = {
+      status: 200,
+      body: { ...processing, transaction: { ...processing.transaction, status: 'pending', error_code: 'insufficient_funds', payer_message: 'Not enough money.' } },
+    };
+    const race = async (complete: Answer) => {
+      const s = await clientSession('client-session-start-202', complete);
+      api.answer('GET /pay/status', refusedBefore);
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const realFetch = api.fetch.getMockImplementation()!;
+      api.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (url.endsWith('/pay/client-session/complete')) await held;
+        return realFetch(url, init);
+      });
+      // Back from the PSP's page: the poll answers first, /complete is still running.
+      emit('background');
+      emit('active');
+      await settle();
+      expect(api.callsTo('GET /pay/status').length).toBeGreaterThan(0);
+      expect(s.controller.getSnapshot().screen.name).toBe('pending');
+      expect(s.onError).not.toHaveBeenCalled();
+      release();
+      await settle();
+      return s;
+    };
+
+    // Paid: the success, never the refusal.
+    const paid = await race('client-session-complete-200');
+    expect(paid.controller.getSnapshot().state).toBe('SUCCESS');
+    expect(paid.onSuccess).toHaveBeenCalledTimes(1);
+    expect(paid.onError).not.toHaveBeenCalled();
+    expect(paid.onStateChange).not.toHaveBeenCalledWith(expect.objectContaining({ state: 'FAILED' }));
+    paid.controller.hostGone();
+    api.restore();
+
+    // Not paid yet (202): still pending, the watch goes on, and its next news counts.
+    jest.useFakeTimers();
+    const notYet = await race('client-session-complete-202');
+    expect(notYet.controller.getSnapshot().state).toBe('PENDING');
+    expect(notYet.onError).not.toHaveBeenCalled();
+    api.answer('GET /pay/status', 'status-succeeded');
+    await jest.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(notYet.controller.getSnapshot().state).toBe('SUCCESS');
+    notYet.controller.hostGone();
+    api.restore();
+    jest.useRealTimers();
+
+    // Declined by the PSP (402): its own decline.
+    const declined = await race('client-session-complete-402');
+    expect(declined.controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { decline_code: 'failed' } });
+    expect(declined.onError).toHaveBeenCalledTimes(1);
+    declined.controller.hostGone();
   });
 
   it('CS-03 reports client sessions unavailable in sandbox', async () => {

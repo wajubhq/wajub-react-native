@@ -3,6 +3,11 @@
  * PR-01…PR-08): unknown keys are ignored, every key is optional, numbers
  * arrive as integers, decimals or numeric strings, booleans as booleans,
  * 0/1 or "true"/"false", and keys with a dot (`name.fr`) are literal keys.
+ *
+ * An object read here keeps every key of the answer, as 1.4 handed the JSON
+ * over as it came (`payment_limits`, `checkout_fields`, `currency_conversion`,
+ * `tax`, `processing_context.bank_transfer_account`…): the keys the SDK reads
+ * carry the values read here, and one it reads as absent or unusable is left out.
  */
 import type {
   AltchaChallenge,
@@ -70,10 +75,24 @@ function nullable<T>(value: T | undefined): T | null {
   return value === undefined ? null : value;
 }
 
+/**
+ * `read` laid over the answer's own object: its other keys stay as they came.
+ * A key `read` has as `undefined`, or one of `handled` it does not have, is left out.
+ */
+function keep<T extends object>(raw: Json, read: T, handled: readonly string[] = []): T {
+  const out: Json = { ...raw };
+  for (const key of handled) delete out[key];
+  for (const [key, value] of Object.entries(read)) {
+    if (value === undefined) delete out[key];
+    else out[key] = value;
+  }
+  return out as T;
+}
+
 function parseProcessingContext(raw: unknown): ProcessingContext | undefined {
   const c = obj(raw);
   if (!c) return undefined;
-  return {
+  return keep(c, {
     channel_slug: nullable(str(c.channel_slug)),
     is_mobile_money: bool(c.is_mobile_money) ?? false,
     is_ussd: bool(c.is_ussd) ?? false,
@@ -84,7 +103,7 @@ function parseProcessingContext(raw: unknown): ProcessingContext | undefined {
     three_ds_method: nullable(str(c.three_ds_method)),
     masked_email: nullable(str(c.masked_email)),
     three_ds_timeout: nullable(num(c.three_ds_timeout)),
-  };
+  });
 }
 
 /**
@@ -110,7 +129,7 @@ export function parseTransaction(raw: unknown, strict = false): SessionTransacti
     remaining_amount: num(t.remaining_amount),
     currency: str(t.currency) ?? '',
     bearer: nullable(str(t.bearer)),
-    fee: fee ? { amount: num(fee.amount) ?? 0, rate: nullable(num(fee.rate)), description: nullable(str(fee.description)) } : null,
+    fee: fee ? keep(fee, { amount: num(fee.amount) ?? 0, rate: nullable(num(fee.rate)), description: nullable(str(fee.description)) }) : null,
     status: str(t.status) ?? 'pending',
     status_label: str(t.status_label),
     sandbox: bool(t.sandbox) ?? false,
@@ -122,17 +141,17 @@ export function parseTransaction(raw: unknown, strict = false): SessionTransacti
     terminal_at: nullable(text(t.terminal_at)),
   };
   if (customer === null) transaction.customer = null;
-  else if (customer) transaction.customer = { name: nullable(str(customer.name)), email: nullable(str(customer.email)) };
+  else if (customer) transaction.customer = keep(customer, { name: nullable(str(customer.name)), email: nullable(str(customer.email)) });
   const context = parseProcessingContext(t.processing_context);
   if (context) transaction.processing_context = context;
-  return transaction;
+  return keep(t, transaction, ['customer', 'processing_context']);
 }
 
 function parseOperator(raw: unknown): ChannelOperator | undefined {
   const o = obj(raw);
   const operator = text(o?.operator);
   if (!o || !operator) return undefined;
-  return { slug: str(o.slug) ?? '', operator: operator.toLowerCase(), name: str(o.name) ?? operator, logo: nullable(text(o.logo)) };
+  return keep(o, { slug: str(o.slug) ?? '', operator: operator.toLowerCase(), name: str(o.name) ?? operator, logo: nullable(text(o.logo)) });
 }
 
 export function parseChannel(raw: unknown): SessionChannel | undefined {
@@ -163,19 +182,19 @@ export function parseChannel(raw: unknown): SessionChannel | undefined {
     .map(parseOperator)
     .filter((o): o is ChannelOperator => !!o);
   if (operators.length > 0) channel.operators = operators;
-  return channel;
+  return keep(c, channel, ['name.fr', 'name_fr', 'min_amount', 'max_amount', 'operators']);
 }
 
 function parseEcho(raw: unknown): EchoConfig | undefined {
   const e = obj(raw);
   if (!e) return undefined;
-  return {
+  return keep(e, {
     key: str(e.key) ?? '',
     ws_host: str(e.ws_host) ?? '',
     ws_port: num(e.ws_port) ?? 443,
     channel_prefix: str(e.channel_prefix) ?? 'private-payment.',
     broadcaster: str(e.broadcaster) ?? 'pusher',
-  };
+  });
 }
 
 /** The branding keys the API sends (three sources); anything else is dropped. */
@@ -215,13 +234,13 @@ function parseAltcha(raw: unknown): AltchaChallenge | null {
   const a = obj(raw);
   const challenge = text(a?.challenge);
   if (!a || !challenge) return null;
-  return {
+  return keep(a, {
     algorithm: str(a.algorithm) ?? 'SHA-256',
     challenge,
     salt: str(a.salt) ?? '',
     signature: str(a.signature) ?? '',
     maxnumber: num(a.maxnumber) ?? 1_000_000,
-  };
+  });
 }
 
 function parseSavedMethod(raw: unknown): SavedMethod | undefined {
@@ -230,16 +249,16 @@ function parseSavedMethod(raw: unknown): SavedMethod | undefined {
   if (!m || !id) return undefined;
   const base = { id, is_default: bool(m.is_default) ?? false, label: str(m.label) ?? '' };
   if (m.type === 'mobile_money') {
-    return {
+    return keep<SavedMethod>(m, {
       ...base,
       type: 'mobile_money',
       provider: str(m.provider) ?? '',
       last4: nullable(str(m.last4)),
       phone_country: nullable(str(m.phone_country)),
-    };
+    });
   }
   if (m.type === 'card') {
-    return { ...base, type: 'card', brand: nullable(str(m.brand)), last4: nullable(str(m.last4)) };
+    return keep<SavedMethod>(m, { ...base, type: 'card', brand: nullable(str(m.brand)), last4: nullable(str(m.last4)) });
   }
   return undefined;
 }
@@ -275,7 +294,7 @@ export function parseSession(raw: unknown): SessionData {
   if (Array.isArray(body.saved_methods)) {
     session.saved_methods = body.saved_methods.map(parseSavedMethod).filter((m): m is SavedMethod => !!m);
   }
-  return session;
+  return keep(body, session, ['locale', 'branding', 'echo', 'features', 'saved_methods']);
 }
 
 /** GET /pay/sdk-config. */
@@ -284,7 +303,7 @@ export function parseSdkConfig(raw: unknown): SdkConfig {
   for (const [slug, value] of Object.entries(obj(obj(raw)?.channels) ?? {})) {
     const c = obj(value);
     if (!c) continue;
-    const entry: SdkChannelConfig = {
+    const read: SdkChannelConfig = {
       available: bool(c.available) ?? false,
       provider: nullable(str(c.provider)),
       // The API may send flavours the 1.4 type does not name (`psp_inline`…).
@@ -295,12 +314,12 @@ export function parseSdkConfig(raw: unknown): SdkConfig {
         .filter((f): f is string => !!f),
     };
     const clientSession = bool(c.client_session);
-    if (clientSession !== undefined) entry.client_session = clientSession;
-    if (str(c.inline)) entry.inline = str(c.inline);
-    if (bool(c.testmode) !== undefined) entry.testmode = bool(c.testmode);
-    channels[slug] = entry;
+    if (clientSession !== undefined) read.client_session = clientSession;
+    if (str(c.inline)) read.inline = str(c.inline);
+    if (bool(c.testmode) !== undefined) read.testmode = bool(c.testmode);
+    channels[slug] = keep(c, read, ['client_session', 'inline', 'testmode']);
   }
-  return { channels };
+  return keep(obj(raw) ?? {}, { channels });
 }
 
 /** GET /pay/status `transaction`, and a realtime `PaymentStatusUpdated` payload (a JSON string or an object). */
@@ -377,7 +396,7 @@ function parseClientSession(raw: unknown): ClientSession | undefined {
   }
   const amount = num(c.amount);
   if (amount !== undefined) session.amount = amount;
-  return session;
+  return keep(c, session, ['reference', 'currency', 'hosted_url', 'access_code', 'public_key', 'encryption_key', 'customer_email', 'customer_name', 'amount']);
 }
 
 export function parseProcess(raw: unknown): RawProcessBody {
@@ -398,7 +417,7 @@ export function parseProcess(raw: unknown): RawProcessBody {
   if (timeout !== undefined) body.three_ds_timeout = timeout;
   const clientSession = parseClientSession(b.client_session);
   if (clientSession) body.client_session = clientSession;
-  return body;
+  return keep(b, body, ['action', 'transaction', ...PROCESS_STRINGS, 'three_ds_timeout', 'client_session']);
 }
 
 /** POST /pay/{kind}/verify, HTTP 200. Anything but `success` is a failure. */

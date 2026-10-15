@@ -67,6 +67,81 @@ describe('CN — cancel and dismiss', () => {
     expect(events.slice(-2)).toEqual(['cancel:payer_cancelled', 'complete:cancelled']);
   });
 
+  it('CN-01 takes nothing while the cancel runs', async () => {
+    for (const refused of [false, true]) {
+      // The cancel (or, once refused, the status read that follows) has not answered yet.
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const { events, options } = recorder();
+      const { controller } = await sheet(
+        {
+          'POST /pay/cancel': refused ? 'cancel-400-not-cancellable' : 'cancel-200',
+          'GET /pay/status': { status: 200, body: { transaction: { reference: 'CMD-4172', status: 'cancelled' } } },
+          'POST /pay/process': 'process-processing-mobile-money-live',
+        },
+        options,
+      );
+      const realFetch = api.fetch.getMockImplementation()!;
+      api.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (url.endsWith(refused ? '/pay/status' : '/pay/cancel')) await held;
+        return realFetch(url, init);
+      });
+      controller.chooseMethod('mobile_money');
+      const mtn = operatorChoices(controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+      const cancelling = controller.cancelPayment();
+      await settle();
+      expect(controller.getSnapshot()).toMatchObject({ cancelling: true, busy: true });
+
+      // Pay, X, Cancel again, another method, Stripe's button: all ignored.
+      await controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+      controller.beginCardPayment();
+      controller.backToMethods();
+      controller.chooseMethod('card');
+      controller.dismiss();
+      await controller.cancelPayment();
+      await settle();
+      // Every request, answered or not.
+      const sent = (path: string) => api.fetch.mock.calls.filter(([url]) => String(url).endsWith(path)).length;
+      expect(sent('/pay/process')).toBe(0);
+      expect(sent('/pay/cancel')).toBe(1);
+      expect(controller.getSnapshot()).toMatchObject({ cancelling: true, state: 'COLLECTING_DETAILS', screen: { name: 'form', method: { kind: 'mobile_money' } } });
+      expect(controller.closed).toBe(false);
+
+      release();
+      await cancelling;
+      await settle();
+      await expect(controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'payer_cancelled' });
+      expect(events.filter((e) => e.startsWith('paymentStarted'))).toHaveLength(0);
+      api.restore();
+    }
+
+    // The cancel a dismiss sends: the sheet is hidden, and still takes nothing until it settles.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const { controller } = await sheet({ 'POST /pay/process': 'process-processing-mobile-money-live', 'POST /pay/client-session': 'client-session-start-202' });
+    const realFetch = api.fetch.getMockImplementation()!;
+    api.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/pay/cancel')) await held;
+      return realFetch(url, init);
+    });
+    controller.chooseMethod('mobile_money');
+    const mtn = operatorChoices(controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+    controller.dismiss();
+    expect(controller.getSnapshot()).toMatchObject({ visible: false, cancelling: true });
+    await controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+    controller.beginCardPayment();
+    await controller.payStripe('pm_late');
+    await controller.cancelPayment();
+    await settle();
+    const sent = (path: string) => api.fetch.mock.calls.filter(([url]) => String(url).endsWith(path)).length;
+    expect(sent('/pay/process')).toBe(0);
+    expect(sent('/pay/cancel')).toBe(1);
+    expect(controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', busy: false });
+    release();
+    await expect(controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
+    expect(sent('/pay/process')).toBe(0);
+  });
+
   it('CN-02 cancels on dismiss before any attempt', async () => {
     const dismissed = await sheet({});
     dismissed.controller.dismiss();
@@ -97,6 +172,61 @@ describe('CN — cancel and dismiss', () => {
     loading.controller.dismiss();
     await expect(loading.controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed', redirectUrl: null });
     expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+  });
+
+  it('CN-02 releases the order when the payer closes a failure', async () => {
+    // A decline: the failure screen, the payment `pending` again.
+    const { events, options } = recorder();
+    const declined = await sheet({ 'POST /pay/process': 'process-402-insufficient-funds-sandbox' }, options);
+    await payMtn(declined.controller);
+    const shown = declined.controller.getSnapshot().screen;
+    expect(shown).toMatchObject({ name: 'failed', error: { decline_code: 'insufficient_funds' } });
+    declined.controller.dismiss();
+    // `failed`, with the error the payer saw; the cancel goes too, and onCancel does not fire.
+    await expect(declined.controller.result).resolves.toMatchObject({ status: 'failed', error: shown.name === 'failed' ? { code: shown.error.code } : {} });
+    await settle();
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(1);
+    expect(events.filter((e) => e.startsWith('cancel'))).toEqual([]);
+    expect(events.slice(-1)).toEqual(['complete:failed']);
+    api.restore();
+
+    // With cancelOnDismiss: false, nothing is cancelled.
+    const kept = await sheet({ 'POST /pay/process': 'process-402-insufficient-funds-sandbox' }, { cancelOnDismiss: false });
+    await payMtn(kept.controller);
+    kept.controller.dismiss();
+    await expect(kept.controller.result).resolves.toMatchObject({ status: 'failed' });
+    await settle();
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+    api.restore();
+
+    // A payment that ended (`failed` status): nothing to release, no call.
+    jest.useFakeTimers();
+    const ended = await sheet({
+      'POST /pay/process': 'process-processing-mobile-money-live',
+      'GET /pay/status': { status: 200, body: { transaction: { reference: 'CMD-4172', status: 'failed' } } },
+    });
+    await payMtn(ended.controller);
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(ended.controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { code: 'payment_failed' } });
+    ended.controller.dismiss();
+    await expect(ended.controller.result).resolves.toMatchObject({ status: 'failed', error: { code: 'payment_failed' } });
+    await settle();
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+    api.restore();
+    jest.useRealTimers();
+
+    // "Try again", then closed on the form: a dismiss before any attempt.
+    const again = await sheet({ 'POST /pay/process': 'process-402-insufficient-funds-sandbox' });
+    await payMtn(again.controller);
+    again.controller.tryAgain();
+    again.controller.dismiss();
+    await expect(again.controller.result).resolves.toEqual({
+      status: 'cancelled',
+      reason: 'dismissed',
+      redirectUrl: body('cancel-200').redirect_url,
+      cancelled: true,
+    });
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(1);
   });
 
   it('CN-03 dismiss after start resolves processing', async () => {
@@ -162,6 +292,80 @@ describe('CN — cancel and dismiss', () => {
       await expect(unknown.controller.result).resolves.toMatchObject({ status: 'processing', transaction: { id: 'trx_PVrU8x2kQ1mNa7Lb3cDe' } });
       api.restore();
     }
+  });
+});
+
+describe('CN — what may be cancelled', () => {
+  it('CN-04 never cancels a payment that may be under way', async () => {
+    // The session answered, sdk-config has not: its status decides a dismiss at once.
+    const cases: Array<[string, Record<string, unknown>, number]> = [
+      ['session-processing-mobile-money', { status: 'processing', transaction: { status: 'processing' } }, 0],
+      ['session-terminal-succeeded', { status: 'complete', payment: { method: 'unknown' } }, 0],
+      ['session-terminal-failed', { status: 'failed', error: { code: 'session_terminal_failed' } }, 0],
+      ['session-cm-aggregate', { status: 'cancelled', reason: 'dismissed', redirectUrl: body('cancel-200').redirect_url }, 1],
+    ];
+    for (const [session, result, cancels] of cases) {
+      const { controller } = await sheet({ 'GET /pay/session': session, 'GET /pay/sdk-config': 'hang' });
+      expect(controller.getSnapshot().screen.name).toBe('loading');
+      controller.dismiss();
+      await expect(controller.result).resolves.toMatchObject(result);
+      expect([session, api.callsTo('POST /pay/cancel').length]).toEqual([session, cancels]);
+      api.restore();
+    }
+    // The host going away there: the same, never a call.
+    const gone = await sheet({ 'GET /pay/session': 'session-processing-mobile-money', 'GET /pay/sdk-config': 'hang' });
+    gone.controller.hostGone();
+    await expect(gone.controller.result).resolves.toMatchObject({ status: 'processing' });
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+    api.restore();
+
+    // An attempt is undecided from its request to a definitive answer: no "Cancel payment", a dismiss calls nothing.
+    jest.useFakeTimers();
+    const refused = await sheet({
+      'POST /pay/process': 'process-processing-mobile-money-live',
+      'GET /pay/status': 'status-pending-attempt-refused',
+    });
+    await payMtn(refused.controller);
+    expect(refused.controller.getSnapshot()).toMatchObject({ state: 'APPROVAL_REQUIRED', canCancel: false });
+    await refused.controller.cancelPayment();
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+    // Refused (`pending` with a new error_code, after it was seen processing): pending again —
+    // "Cancel payment" is back, and a dismiss cancels as before any attempt.
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(refused.controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { retryable: true } });
+    refused.controller.tryAgain();
+    expect(refused.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', canCancel: true });
+    refused.controller.dismiss();
+    await expect(refused.controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed', redirectUrl: body('cancel-200').redirect_url });
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(1);
+    api.restore();
+
+    // A step that fails for good is a definitive refusal too.
+    const step = await sheet({
+      'GET /pay/sdk-config': 'sdk-config-card-kkiapay',
+      'POST /pay/process': 'process-requires-otp',
+      'POST /pay/otp/verify': 'otp-verify-max-attempts',
+      'GET /pay/status': 'status-processing',
+    });
+    step.controller.chooseMethod('card');
+    await step.controller.payCard({ email: 'awa.ngono@example.com' });
+    await settle();
+    expect(step.controller.getSnapshot()).toMatchObject({ state: 'OTP_REQUIRED', canCancel: false });
+    await step.controller.submitStep({ code: '000000' });
+    step.controller.tryAgain();
+    expect(step.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', canCancel: true });
+    step.controller.hostGone();
+    api.restore();
+    jest.useRealTimers();
+
+    // A decline answered at once never ran: the payment can still be cancelled.
+    const declined = await sheet({ 'POST /pay/process': 'process-402-insufficient-funds-sandbox' });
+    await payMtn(declined.controller);
+    declined.controller.tryAgain();
+    expect(declined.controller.getSnapshot().canCancel).toBe(true);
+    await declined.controller.cancelPayment();
+    await expect(declined.controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'payer_cancelled' });
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(1);
   });
 });
 

@@ -1,7 +1,10 @@
 import { readdirSync } from 'fs';
 
+import { PayClient } from '../../client/payClient';
 import { WajubError } from '../../WajubError';
-import { body, fixture, FIXTURES_DIR } from '../../test/fakeApi';
+import { WajubSession } from '../../WajubSession';
+import { body, fakeApi, fixture, FIXTURES_DIR } from '../../test/fakeApi';
+import type { FakeApi } from '../../test/fakeApi';
 import {
   parseApiError,
   parseBroadcastAuth,
@@ -33,6 +36,9 @@ function parseByEndpoint(name: string): unknown {
   return parseProcess(f.body);
 }
 
+let api: FakeApi | undefined;
+afterEach(() => api?.restore());
+
 describe('PR — parsing', () => {
   it('PR-01 parses every fixture', () => {
     expect(names.length).toBeGreaterThanOrEqual(92);
@@ -57,10 +63,62 @@ describe('PR — parsing', () => {
     injected.channels[0].future_key = [1, 2];
     injected.channels[1].operators[0].future_key = null;
 
-    // `branding` itself is the API's object, as 1.4 handed it over; its reading is `parsedBranding`.
-    const withoutRaw = (body: unknown) => ({ ...parseSession(body), branding: undefined });
-    expect(withoutRaw(injected)).toEqual(withoutRaw(raw));
-    expect(parseSession(raw).branding).toEqual(raw.branding);
+    // Nothing the SDK reads changes. `branding` itself is the API's object, as
+    // 1.4 handed it over; its reading is `parsedBranding`.
+    const parsed = parseSession(injected);
+    const unknownRemoved = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(unknownRemoved);
+      if (!value || typeof value !== 'object') return value;
+      return Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'future_key').map(([key, v]) => [key, unknownRemoved(v)]));
+    };
+    expect(unknownRemoved({ ...parsed, branding: undefined })).toEqual({ ...parseSession(raw), branding: undefined });
+    // An unknown key is passed through as it came, as 1.4 handed the JSON over.
+    expect(parsed.branding).toEqual(injected.branding);
+    expect((parsed as unknown as { future_key: unknown }).future_key).toEqual({ nested: true });
+    expect((parsed.transaction as unknown as { future_key: unknown }).future_key).toBe('x');
+  });
+
+  it('PR-02 keeps every key of the answer, as 1.4 handed the JSON over', async () => {
+    // Every leaf of every answer the SDK parses into an object is still there.
+    const paths = (value: unknown, prefix = ''): string[] => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return [prefix];
+      return Object.entries(value).flatMap(([key, v]) => paths(v, prefix ? `${prefix}.${key}` : key));
+    };
+    const dropped: string[] = [];
+    for (const name of names) {
+      const f = fixture(name);
+      const parse = name.startsWith('session-')
+        ? parseSession
+        : name.startsWith('sdk-config-')
+          ? parseSdkConfig
+          : /^(process-|client-session-)/.test(name) && f.http_status < 300
+            ? parseProcess
+            : null;
+      if (!parse) continue;
+      const kept = new Set(paths(parse(f.body)));
+      // A `locale: null` is left out: `locale` is a string when present, as 1.4 typed it.
+      const nullLocale = (path: string) => path === 'locale' && (f.body as { locale?: unknown }).locale == null;
+      dropped.push(...paths(f.body).filter((path) => !kept.has(path) && !nullLocale(path)).map((path) => `${name}: ${path}`));
+    }
+    expect(dropped).toEqual([]);
+
+    // Through the 1.4 API: loadSession() and a payment's transaction.
+    const session = body('session-cm-aggregate');
+    session.payment_limits = { mobile_money_max_per_tx: 500000 };
+    session.checkout_fields = [{ name: 'note', required: false }];
+    session.transaction.currency_conversion = { from: 'EUR', rate: 655.957 };
+    session.transaction.tax = { amount: 0 };
+    const processing = body('process-processing-mobile-money-live');
+    processing.transaction.processing_context = { ...processing.transaction.processing_context, bank_transfer_account: { iban: 'CM21 0000' } };
+    api = fakeApi({ 'GET /pay/session': { status: 200, body: session }, 'POST /pay/process': { status: 202, body: processing } });
+    const legacy = new WajubSession('tok', new PayClient({ sleep: async () => undefined }));
+    const loaded = (await legacy.loadSession()) as unknown as Record<string, unknown> & { transaction: Record<string, unknown> };
+    expect(loaded.payment_limits).toEqual({ mobile_money_max_per_tx: 500000 });
+    expect(loaded.checkout_fields).toEqual([{ name: 'note', required: false }]);
+    expect(loaded.transaction.currency_conversion).toEqual({ from: 'EUR', rate: 655.957 });
+    expect(loaded.transaction.tax).toEqual({ amount: 0 });
+    const paid = await legacy.payMobileMoney({ channel_slug: 'cm.mtn', phone: '+237670000000', country: 'CM' });
+    expect(paid.transaction?.processing_context).toMatchObject({ bank_transfer_account: { iban: 'CM21 0000' } });
   });
 
   it('PR-03 accepts numbers as int, double or numeric string', () => {

@@ -109,11 +109,12 @@ export function installFingerprint(storage?: WajubStorage): Promise<string> {
 }
 
 async function readFingerprint(store: WajubStorage | null): Promise<string> {
-  let id: string | null = null;
+  let id: string | null;
   try {
     id = (await store?.getItem(INSTALL_ID_KEY)) ?? null;
   } catch {
-    id = null;
+    // The stored id could not be read: one for this run only, never written over the stored one.
+    return sha256Hex(`device:${uuidV4()}`);
   }
   if (!id) {
     id = uuidV4();

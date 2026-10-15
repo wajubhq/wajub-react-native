@@ -6,6 +6,7 @@ import Pusher from 'pusher-js';
 import { AppState } from 'react-native';
 import type { AppStateStatus, NativeEventSubscription } from 'react-native';
 
+import { monotonicNow } from '../clock';
 import type { PayClient } from '../client/payClient';
 import type { Lang } from '../errorCatalogue';
 import type { EchoConfig, PaymentStatus, PresentOptions } from '../types';
@@ -38,7 +39,7 @@ export type WatchOutcome =
   | { kind: 'ended' };
 
 /** A payment back at `pending` after this attempt was seen processing: refused, nothing charged. */
-function attemptEnded(status: PaymentStatus, lang: Lang): WajubError {
+export function attemptEnded(status: PaymentStatus, lang: Lang): WajubError {
   if (!status.error_code) return WajubError.create('payment_attempt_ended', { lang });
   const declined = WajubError.fromResponse({
     status: 402,
@@ -91,7 +92,7 @@ export interface WatcherOptions {
   lang: Lang;
   /** This attempt was already seen `processing` (its 2xx, or a restore). */
   seenProcessing: boolean;
-  /** Epoch ms when polling gives up: 15 min after the attempt started, or `expires_at` if earlier. Infinity: never. */
+  /** When polling gives up, on the monotonic clock (`monotonicNow()`): 15 min after the attempt started. Infinity: never. */
   deadline: number;
   /** Poll once right away, then on the schedule (1.4's `watchStatus()`). */
   pollImmediately?: boolean;
@@ -116,7 +117,7 @@ export class StatusWatcher {
   private interval: number;
   private readonly baseInterval: number;
   private lastStatus: string | null = null;
-  private lastChangeAt = Date.now();
+  private lastChangeAt = monotonicNow();
   private seenProcessing: boolean;
   private appState: NativeEventSubscription | null = null;
   private background = false;
@@ -130,7 +131,7 @@ export class StatusWatcher {
   }
 
   start(): void {
-    this.lastChangeAt = Date.now();
+    this.lastChangeAt = monotonicNow();
     this.connectRealtime();
     this.appState = AppState.addEventListener('change', (state: AppStateStatus) => {
       if (state === 'active') {
@@ -178,14 +179,14 @@ export class StatusWatcher {
   private schedule(delay: number): void {
     if (this.stopped || this.background) return;
     this.clearTimer();
-    const remaining = this.options.deadline - Date.now();
+    const remaining = this.options.deadline - monotonicNow();
     if (remaining <= 0) {
       this.finish({ kind: 'cap' });
       return;
     }
     this.timer = setTimeout(() => {
       this.timer = null;
-      if (Date.now() >= this.options.deadline) this.finish({ kind: 'cap' });
+      if (monotonicNow() >= this.options.deadline) this.finish({ kind: 'cap' });
       else void this.poll();
     }, Math.min(delay, remaining));
   }
@@ -194,7 +195,7 @@ export class StatusWatcher {
   private nextInterval(): number {
     if (this.socketConnected) return POLLING.withSocketMs;
     this.interval =
-      Date.now() - this.lastChangeAt >= POLLING.slowAfterMs
+      monotonicNow() - this.lastChangeAt >= POLLING.slowAfterMs
         ? Math.min(this.interval * POLLING.slowFactor, Math.max(POLLING.maxIntervalMs, this.baseInterval))
         : this.baseInterval;
     return this.interval;
@@ -237,7 +238,7 @@ export class StatusWatcher {
     if (this.stopped || !status.status) return;
     if (status.status !== this.lastStatus) {
       this.lastStatus = status.status;
-      this.lastChangeAt = Date.now();
+      this.lastChangeAt = monotonicNow();
     }
     this.options.onStatus?.(status);
     const outcome = this.options.decide

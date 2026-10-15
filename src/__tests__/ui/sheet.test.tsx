@@ -11,6 +11,7 @@ import { CheckoutSheet } from '../../ui/CheckoutSheet';
 import { fakeApi } from '../../test/fakeApi';
 import type { Answer, FakeApi } from '../../test/fakeApi';
 import type { CheckoutResult, PresentOptions } from '../../types';
+import type { WajubError } from '../../WajubError';
 
 // The first render under React Native's preset can be slow on a loaded machine.
 configure({ asyncUtilTimeout: 5000 });
@@ -24,9 +25,9 @@ configure({ asyncUtilTimeout: 5000 });
 const mockStrictEffects = { on: false };
 jest.mock('react', () => {
   const actual = jest.requireActual('react');
-  const useEffect = (effect: () => void | (() => void), deps?: unknown[]) => {
+  const twice = (hook: typeof actual.useEffect) => (effect: () => void | (() => void), deps?: unknown[]) => {
     const ran = actual.useRef(false);
-    return actual.useEffect(() => {
+    return hook(() => {
       if (!mockStrictEffects.on || ran.current) return effect();
       ran.current = true;
       const first = effect();
@@ -34,7 +35,9 @@ jest.mock('react', () => {
       return effect();
     }, deps);
   };
-  return { __esModule: true, ...actual, useEffect, default: { ...actual, useEffect } };
+  const useEffect = twice(actual.useEffect);
+  const useLayoutEffect = twice(actual.useLayoutEffect);
+  return { __esModule: true, ...actual, useEffect, useLayoutEffect, default: { ...actual, useEffect, useLayoutEffect } };
 });
 
 jest.mock('react-native/Libraries/Utilities/useColorScheme', () => ({ __esModule: true, default: jest.fn(() => 'light') }));
@@ -261,6 +264,44 @@ const Host = forwardRef<{ present(o: PresentOptions): Promise<CheckoutResult> }>
   return PaymentSheet;
 });
 
+describe('UI — cancelling', () => {
+  it('disables Pay, the close button and Cancel while the cancel runs', async () => {
+    const controller = await show({ locale: 'en' });
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const realFetch = api.fetch.getMockImplementation()!;
+    api.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/pay/cancel')) await held;
+      return realFetch(url, init);
+    });
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-cancel-payment'));
+    });
+    expect(screen.getByTestId('wajub-dismiss').props.accessibilityState).toMatchObject({ disabled: true });
+    expect(screen.getByTestId('wajub-cancel-payment').props.accessibilityState).toMatchObject({ disabled: true, busy: true });
+    expect(screen.getByTestId('wajub-pay').props.accessibilityState).toMatchObject({ disabled: true });
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-phone'), '670000000');
+      fireEvent.press(screen.getByTestId('wajub-pay'));
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+      fireEvent.press(screen.getByTestId('wajub-cancel-payment'));
+    });
+    const sent = (path: string) => api.fetch.mock.calls.filter(([url]) => String(url).endsWith(path)).length;
+    expect(sent('/pay/process')).toBe(0);
+    expect(sent('/pay/cancel')).toBe(1);
+    expect(controller.closed).toBe(false);
+    await act(async () => {
+      release();
+      await controller.result;
+    });
+    await expect(controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'payer_cancelled' });
+  });
+});
+
 describe('UI — usePayment', () => {
   it('ST-04 settles when the host goes away', async () => {
     api = fakeApi(routes());
@@ -324,12 +365,28 @@ describe('UI — usePayment', () => {
     // onSubmit as the payer submits, as in 1.4.
     expect(props.onSubmit).toHaveBeenCalledTimes(1);
     await waitFor(() => screen.getByTestId('wajub-approval'));
-    // Closed before an outcome: 1.4's onDismiss, not an onResult.
+    // Closed during the attempt: 1.4's onResult(processing), as its sheet reported a 202.
     await act(async () => {
       fireEvent.press(screen.getByTestId('wajub-dismiss'));
     });
-    expect(props.onDismiss).toHaveBeenCalledTimes(1);
-    expect(props.onResult).not.toHaveBeenCalled();
+    expect(props.onResult).toHaveBeenCalledTimes(1);
+    expect(props.onResult).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'processing', transaction: expect.objectContaining({ reference: expect.any(String) }) }),
+    );
+    expect(props.onDismiss).not.toHaveBeenCalled();
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+    screen.unmount();
+
+    // Closed before any attempt: onDismiss, and the payment is left open.
+    const early = { visible: true, locale: 'en', onSubmit: jest.fn(), onDismiss: jest.fn(), onResult: jest.fn() };
+    render(<PaymentSheet {...early} session={new WajubSession('tok_legacy_early')} />);
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+    });
+    expect(early.onDismiss).toHaveBeenCalledTimes(1);
+    expect(early.onResult).not.toHaveBeenCalled();
+    expect(early.onSubmit).not.toHaveBeenCalled();
     expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
   });
 
@@ -432,6 +489,25 @@ describe('UI — usePayment', () => {
         fireEvent.press(screen.getByTestId('wajub-dismiss'));
       });
       await expect(result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
+      screen.unmount();
+
+      // Presenting right away, while the clean-up of the first run is still due: the host is there.
+      render(
+        <React.StrictMode>
+          <Host ref={host} />
+        </React.StrictMode>,
+      );
+      let early!: Promise<CheckoutResult>;
+      act(() => {
+        early = host.current!.present({ sessionToken: 'tok_strict_early', readyTimeout: 0, cancelOnDismiss: false });
+      });
+      await waitFor(() => screen.getByTestId('wajub-dismiss'));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(screen.getByTestId('wajub-dismiss')).toBeTruthy();
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('wajub-dismiss'));
+      });
+      await expect(early).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
     } finally {
       mockStrictEffects.on = false;
     }
@@ -474,5 +550,117 @@ describe('UI — usePayment', () => {
       fireEvent.press(screen.getByTestId('wajub-dismiss'));
     });
     await expect(first).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
+  });
+
+  it('settles a present() called after its host unmounted at once', async () => {
+    api = fakeApi(routes());
+    const host = React.createRef<{ present(o: PresentOptions): Promise<CheckoutResult> }>();
+    render(<Host ref={host} />);
+    const present = host.current!.present;
+    // The app awaited something, and the screen went away meanwhile.
+    screen.unmount();
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    const onCancel = jest.fn();
+    const onComplete = jest.fn();
+    await expect(present({ sessionToken: 'tok_late', readyTimeout: 0, onCancel, onComplete })).resolves.toEqual({
+      status: 'cancelled',
+      reason: 'host_gone',
+      redirectUrl: null,
+      cancelled: true,
+    });
+    expect(onCancel).toHaveBeenCalledWith({ reason: 'host_gone', redirectUrl: null });
+    expect(onComplete).toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled', reason: 'host_gone' }));
+    // No API call, and no sheet holds the app: the next host presents.
+    expect(api.calls).toHaveLength(0);
+    render(<Host ref={host} />);
+    let next!: Promise<CheckoutResult>;
+    await act(async () => {
+      next = host.current!.present({ sessionToken: 'tok_next', readyTimeout: 0, cancelOnDismiss: false });
+    });
+    await waitFor(() => screen.getByTestId('wajub-dismiss'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+    });
+    await expect(next).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
+  });
+
+  it('settles the sheet of a host replaced in the same commit before the new host presents', async () => {
+    api = fakeApi(routes());
+    const results: string[] = [];
+    function Swapped({ token }: { token: string }) {
+      const { present, PaymentSheet: element } = usePayment();
+      useEffect(() => {
+        present({ sessionToken: token, readyTimeout: 0, cancelOnDismiss: false }).then(
+          (r) => results.push(`${token}:${r.status}:${'reason' in r ? r.reason : ''}`),
+          (e: WajubError) => results.push(`${token}:rejected:${e.code}`),
+        );
+      }, [present, token]);
+      return element;
+    }
+    const { rerender } = render(<View><Swapped key="a" token="tok_a" /></View>);
+    await waitFor(() => screen.getByTestId('wajub-dismiss'));
+    // The first host's sheet is still open as the second host mounts and presents.
+    rerender(<View><Swapped key="b" token="tok_b" /></View>);
+    await waitFor(() => expect(api.calls.filter((c) => c.headers.Authorization === 'Bearer tok_b').length).toBeGreaterThan(0));
+    expect(results).toEqual(['tok_a:cancelled:host_gone']);
+    await waitFor(() => screen.getByTestId('wajub-dismiss'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+    });
+    await waitFor(() => expect(results).toEqual(['tok_a:cancelled:host_gone', 'tok_b:cancelled:dismissed']));
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+  });
+
+  it('opens the deprecated PaymentSheet once the sheet open before it closes', async () => {
+    api = fakeApi(routes());
+    const host = React.createRef<{ present(o: PresentOptions): Promise<CheckoutResult> }>();
+    const legacy = { onSubmit: jest.fn(), onDismiss: jest.fn(), onResult: jest.fn() };
+    const legacyCalls = () => api.calls.filter((c) => c.headers.Authorization === 'Bearer tok_waiting').length;
+    const { rerender } = render(<View><Host ref={host} /></View>);
+    let first!: Promise<CheckoutResult>;
+    await act(async () => {
+      first = host.current!.present({ sessionToken: 'tok_hook', readyTimeout: 0, cancelOnDismiss: false });
+    });
+    await waitFor(() => screen.getByTestId('wajub-dismiss'));
+
+    // Made visible while the other sheet is open: it waits, without a word.
+    rerender(<View><Host ref={host} /><PaymentSheet visible session={new WajubSession('tok_waiting')} {...legacy} /></View>);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(screen.getAllByTestId('wajub-dismiss')).toHaveLength(1);
+    expect(legacyCalls()).toBe(0);
+
+    // The other one closes: it opens, and reports as usual.
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+    });
+    await expect(first).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
+    await waitFor(() => expect(legacyCalls()).toBeGreaterThan(0));
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    expect(legacy.onDismiss).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+    });
+    expect(legacy.onDismiss).toHaveBeenCalledTimes(1);
+    expect(legacy.onResult).not.toHaveBeenCalled();
+    screen.unmount();
+
+    // Hidden again while it waits: it does not open later.
+    const hidden = { onSubmit: jest.fn(), onDismiss: jest.fn(), onResult: jest.fn() };
+    const hiddenCalls = () => api.calls.filter((c) => c.headers.Authorization === 'Bearer tok_hidden').length;
+    const second = render(<View><Host ref={host} /></View>);
+    let other!: Promise<CheckoutResult>;
+    await act(async () => {
+      other = host.current!.present({ sessionToken: 'tok_hook_2', readyTimeout: 0, cancelOnDismiss: false });
+    });
+    await waitFor(() => screen.getByTestId('wajub-dismiss'));
+    second.rerender(<View><Host ref={host} /><PaymentSheet visible session={new WajubSession('tok_hidden')} {...hidden} /></View>);
+    second.rerender(<View><Host ref={host} /><PaymentSheet visible={false} session={new WajubSession('tok_hidden')} {...hidden} /></View>);
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-dismiss'));
+    });
+    await expect(other).resolves.toMatchObject({ status: 'cancelled' });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(hiddenCalls()).toBe(0);
+    expect(screen.queryAllByTestId('wajub-dismiss')).toHaveLength(0);
   });
 });

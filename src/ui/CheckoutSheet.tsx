@@ -152,7 +152,15 @@ export function CheckoutSheet({ controller }: { controller: CheckoutController }
                     </View>
                   ) : null}
                 </View>
-                <Pressable testID="wajub-dismiss" accessibilityRole="button" accessibilityLabel={t.close} hitSlop={12} onPress={controller.dismiss}>
+                <Pressable
+                  testID="wajub-dismiss"
+                  accessibilityRole="button"
+                  accessibilityLabel={t.close}
+                  accessibilityState={{ disabled: snapshot.cancelling }}
+                  disabled={snapshot.cancelling}
+                  hitSlop={12}
+                  onPress={controller.dismiss}
+                >
                   <Text style={{ fontSize: 20, color: colors.textSecondary }}>✕</Text>
                 </Pressable>
               </View>

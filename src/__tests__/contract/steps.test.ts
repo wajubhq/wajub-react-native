@@ -114,6 +114,33 @@ describe('CF — confirmation steps', () => {
     }
   });
 
+  it('CF-03 treats a 5xx or no answer on a verify like a network failure', async () => {
+    for (const failure of [{ status: 500 }, { status: 503 }, 'error-500-production', 'network'] as Answer[]) {
+      const { controller, onStateChange } = await step('process-requires-otp', { 'POST /pay/otp/verify': [failure, 'otp-verify-success'] });
+      const polls = api.callsTo('GET /pay/status').length;
+      await controller.submitStep({ code: '123456' });
+      await settle();
+      // Not a failure: the same step, the payer may submit again, and the status is read at once.
+      expect(controller.getSnapshot()).toMatchObject({ state: 'OTP_REQUIRED', busy: false, screen: { name: 'step', step: { kind: 'otp' } } });
+      expect(onStateChange).not.toHaveBeenCalledWith(expect.objectContaining({ state: 'FAILED' }));
+      expect(api.callsTo('POST /pay/otp/verify')).toHaveLength(1);
+      expect(api.callsTo('GET /pay/status').length).toBeGreaterThan(polls);
+      await controller.submitStep({ code: '123456' });
+      expect(api.callsTo('POST /pay/otp/verify')).toHaveLength(2);
+      expect(controller.getSnapshot().state).toBe('PENDING');
+      controller.hostGone();
+      api.restore();
+    }
+
+    // The status the poll reads decides: paid meanwhile.
+    const paid = await step('process-requires-otp', { 'POST /pay/otp/verify': { status: 502 }, 'GET /pay/status': 'status-processing' });
+    api.answer('GET /pay/status', 'status-succeeded');
+    await paid.controller.submitStep({ code: '123456' });
+    await settle();
+    expect(paid.controller.getSnapshot().state).toBe('SUCCESS');
+    paid.controller.hostGone();
+  });
+
   it('CF-04 shows step validation errors', async () => {
     const address = await step('process-requires-address', { 'POST /pay/address/verify': 'address-verify-422-missing-fields' }, { locale: 'en' });
     await address.controller.submitStep({ address: '12 Admiralty Way', city: 'Lagos', state: 'Lagos', zip_code: '101233' });

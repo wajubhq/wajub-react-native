@@ -147,6 +147,24 @@ describe('subscribeStatus — polling stays on next to a connected socket', () =
     expect(updates).toEqual(['processing', 'failed']);
   });
 
+  it('reports every poll, as 1.4 did, when the session has no realtime channel', async () => {
+    const { client, getSession } = pollingClient(['pending', 'processing', 'processing', 'succeeded']);
+    const updates: string[] = [];
+    const { echo: _none, ...withoutEcho } = makeSession(ECHO);
+    watch(client, 'tok', withoutEcho, (r) => updates.push(r.status));
+    expect(FakePusher.instances).toHaveLength(0);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(updates).toEqual(['processing']);
+    await jest.advanceTimersByTimeAsync(5000);
+    await jest.advanceTimersByTimeAsync(5000);
+    // The same status again is told again: no deduplication without a socket.
+    expect(updates).toEqual(['processing', 'processing', 'processing']);
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(updates).toEqual(['processing', 'processing', 'processing', 'complete']);
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(getSession).toHaveBeenCalledTimes(4);
+  });
+
   it('stops on an ended session with the 1.4 error', async () => {
     const { client, getSession } = pollingClient(['processing']);
     const results: PaymentResult[] = [];

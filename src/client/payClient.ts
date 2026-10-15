@@ -9,6 +9,7 @@ import type {
   StepVerifyResponse,
   WajubStorage,
 } from '../types';
+import { monotonicNow } from '../clock';
 import { uuidV4 } from '../crypto';
 import { WajubError } from '../WajubError';
 import type { ErrorPhase, HeaderReader } from '../WajubError';
@@ -368,7 +369,7 @@ export class PayClient {
     }, call.timeoutMs);
     const abort = () => controller.abort();
     options.signal?.addEventListener('abort', abort);
-    options.onSend?.(Date.now());
+    options.onSend?.(monotonicNow());
 
     try {
       const response = await fetch(`${this.baseUrl}${call.path}`, {

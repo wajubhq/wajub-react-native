@@ -7,6 +7,7 @@ import { AppState } from 'react-native';
 import type { AppStateStatus, NativeEventSubscription } from 'react-native';
 
 import { openHostedRedirect } from '../adapters/hostedRedirect';
+import { monotonicNow } from '../clock';
 import { newIdempotencyKey, PayClient } from '../client/payClient';
 import { deviceLocales } from '../client/device';
 import { langOf } from '../errorCatalogue';
@@ -16,6 +17,7 @@ import { isMobileMoneyChannel, mobileMoneyRequestData, operatorChoices, operator
 import type { OperatorChoice } from '../mobileMoney/form';
 import { buildHostedCardRequest } from '../mappers/paymentMapper';
 import type {
+  AltchaChallenge,
   AltchaSolution,
   CheckoutResult,
   CheckoutState,
@@ -34,7 +36,7 @@ import type { RawProcessBody } from '../wire/parse';
 import { solveAltcha } from './altcha';
 import { availableMethods, SANDBOX_CARD_FIELDS, shownSlugs } from './methods';
 import type { MethodEntry } from './methods';
-import { POLLING, StatusWatcher, SUCCESS_STATUSES } from './watcher';
+import { attemptEnded, POLLING, StatusWatcher, SUCCESS_STATUSES } from './watcher';
 import type { WatchOutcome } from './watcher';
 
 export const UI_TIMINGS = {
@@ -131,9 +133,18 @@ interface Attempt {
   data: Record<string, unknown>;
   /** When its last try was sent. */
   sentAt?: number;
+  /** The status's `error_code` known before it was sent (null: none; undefined: not known). */
+  baseline?: string | null;
 }
 
 const FINAL_SCREENS = ['success', 'failed', 'expired', 'cancelled'];
+
+/** A payment that had ended when the session was read: its load error (README §4.2). */
+const TERMINAL_AT_LOAD: Record<string, string> = {
+  failed: 'session_terminal_failed',
+  cancelled: 'session_terminal_cancelled',
+  expired: 'session_terminal_expired',
+};
 
 const STEP_STATES: Record<ConfirmStepKind, CheckoutState> = {
   otp: 'OTP_REQUIRED',
@@ -191,16 +202,35 @@ export class CheckoutController {
   private inFlight = false;
   private clientSessionId: string | null = null;
   private pendingUrl: string | null = null;
-  private altcha: Promise<AltchaSolution | null> | null = null;
-  private altchaAbort = { aborted: false };
+  /** Altcha is on for this payment: no request goes without a solution. */
+  private altchaOn = false;
+  /** The next solution, being fetched or solved; null until one is asked for. */
+  private altcha: Promise<AltchaSolution | WajubError | null> | null = null;
+  /** `altcha` was started ahead of time, after the last solution went out. */
+  private altchaAhead = false;
+  /** The solves under way, stopped when the sheet settles. */
+  private altchaSolves = new Set<{ aborted: boolean }>();
   private altchaRetried = false;
+  /** Pay pressed, its request not sent yet (its Altcha solution on the way). */
+  private pressed = false;
   /** The last client session may have died at the PSP: the next one replaces it. */
   private restartClientSession = false;
-  /** The session answered: closing the sheet may cancel the payment. */
-  private sessionKnown = false;
+  /**
+   * The payment's status as last known: the session's once it answered, then
+   * each status read, and `pending` again after a decline. Only a `pending`
+   * payment is ever cancelled.
+   */
+  private knownStatus: string | null = null;
+  /** A 400 whose status re-read said nothing: a later `pending` read decides as the re-read would have. */
+  private notProcessable: Attempt | null = null;
   private graceTimer: ReturnType<typeof setTimeout> | null = null;
   /** A payment request that got no answer: its key, reused by the next Pay if it never reached the API. */
-  private unanswered: { key: string; sentAt: number } | null = null;
+  private unanswered: { key: string; sentAt: number; baseline: string | null | undefined } | null = null;
+  /** The last `error_code` the status carried, as far as this sheet saw (undefined: never read). */
+  private knownErrorCode: string | null | undefined = undefined;
+  /** POST /pay/client-session/complete is running: it, not a poll, decides the outcome. */
+  private completing = false;
+  private deferredOutcome: WatchOutcome | null = null;
   private reuseKey: string | null = null;
   /** Stripe: Pay pressed, the PaymentMethod being created — the attempt is under way. */
   private stripePressed = false;
@@ -247,7 +277,8 @@ export class CheckoutController {
 
   private update(patch: Partial<CheckoutSnapshot>): void {
     const next = { ...this.snapshot, ...patch };
-    next.canCancel = !this.inFlight && !next.busy && (next.screen.name === 'methods' || next.screen.name === 'form');
+    // While its cancel runs, the button stays, disabled and spinning.
+    next.canCancel = (next.cancelling || !next.busy) && (next.screen.name === 'methods' || next.screen.name === 'form') && this.mayCancel();
     this.snapshot = next;
     this.listeners.forEach((l) => l());
   }
@@ -304,7 +335,9 @@ export class CheckoutController {
     sessionLoad.then(
       async (session) => {
         if (!current()) return;
-        this.sessionKnown = true;
+        // Its status decides what closing the sheet means from now on, before sdk-config is in.
+        this.knownStatus = session.transaction.status.toLowerCase();
+        this.transaction = session.transaction;
         let config: SdkConfig | null | undefined;
         if (needsSdkConfig(session)) {
           // Card or wallets only: they need sdk-config, which gets its own timeouts and retries.
@@ -444,6 +477,18 @@ export class CheckoutController {
     this.update({ methods, screen });
   }
 
+  /**
+   * README §14: `/pay/cancel` goes only for a loaded session whose last known
+   * status is `pending`, with no attempt undecided — sent (or Stripe's Pay
+   * pressed) and no definitive answer yet. The API cancels a `processing`
+   * payment too, one the payer may still approve. After a definitive refusal
+   * (a decline, a `pending` with a new error_code, a failed step) the payment
+   * is `pending` again, and may be cancelled.
+   */
+  private mayCancel(): boolean {
+    return this.knownStatus === 'pending' && !this.inFlight && !this.stripePressed && !this.pressed;
+  }
+
   /** The payer left (closed, cancelling) while the SDK was waiting: nothing more is sent. */
   private abandoned(): boolean {
     return this.settled || this.snapshot.cancelling || !this.snapshot.visible;
@@ -464,7 +509,7 @@ export class CheckoutController {
       channel: ctx.channel_slug ?? '',
       method: ctx.is_mobile_money ? 'mobile_money' : ctx.channel_slug === 'card' ? 'card' : 'unknown',
       key: newIdempotencyKey(),
-      startedAt: Date.now(),
+      startedAt: monotonicNow(),
       started: true,
       phone: null,
       data: {},
@@ -482,10 +527,78 @@ export class CheckoutController {
     this.watch(true);
   }
 
+  /** The session's challenge, solved in the background as soon as it loads. */
   private startAltcha(session: SessionData): void {
     if (!session.altcha || this.altcha) return;
-    this.altchaAbort = { aborted: false };
-    this.altcha = solveAltcha(session.altcha, this.altchaAbort);
+    this.altchaOn = true;
+    this.altchaAhead = false;
+    this.altcha = this.solve(session.altcha);
+  }
+
+  private solve(challenge: AltchaChallenge): Promise<AltchaSolution | WajubError> {
+    const signal = { aborted: this.settled };
+    this.altchaSolves.add(signal);
+    return solveAltcha(challenge, signal).then((solution) => {
+      this.altchaSolves.delete(signal);
+      return solution ?? WajubError.create('security_check_failed', { lang: this.lang });
+    });
+  }
+
+  /** A new challenge from GET /pay/session (with its retries), solved; null when Altcha was turned off. */
+  private fetchAltcha(): Promise<AltchaSolution | WajubError | null> {
+    return this.client.getSession(this.token).then(
+      (session) => {
+        if (this.settled) return null;
+        if (!session.altcha) {
+          this.altchaOn = false;
+          return null;
+        }
+        return this.solve(session.altcha);
+      },
+      (error: unknown) => (error instanceof WajubError ? error.localized(this.lang) : WajubError.create('network_error', { lang: this.lang })),
+    );
+  }
+
+  /**
+   * The solution for the next request (null when Altcha is off). A challenge
+   * fetched ahead of time that failed is asked for again now; one that cannot
+   * be had is an error the payer can retry — nothing is sent without it.
+   */
+  private async nextAltcha(): Promise<AltchaSolution | WajubError | null> {
+    if (!this.altchaOn) return null;
+    if (!this.altcha) {
+      this.altcha = this.fetchAltcha();
+      this.altchaAhead = false;
+    }
+    let result = await this.altcha;
+    if (result instanceof WajubError && this.altchaAhead) {
+      this.altcha = this.fetchAltcha();
+      this.altchaAhead = false;
+      result = await this.altcha;
+    }
+    // Used or failed: the next request asks for another.
+    if (!result || result instanceof WajubError) this.altcha = null;
+    return result;
+  }
+
+  /**
+   * The solution for the request a Pay press is about to send: from the press
+   * on, the attempt is undecided (README §14) — nothing is cancelled meanwhile.
+   */
+  private async solutionForPay(): Promise<AltchaSolution | WajubError | null> {
+    this.pressed = true;
+    try {
+      return await this.nextAltcha();
+    } finally {
+      this.pressed = false;
+    }
+  }
+
+  /** A solution goes with one request only: the next one is fetched and solved ahead. */
+  private useAltcha(data: Record<string, unknown>, solution: AltchaSolution): void {
+    data.altcha = solution;
+    this.altcha = this.fetchAltcha();
+    this.altchaAhead = true;
   }
 
   // ── choosing a method ───────────────────────────────────────────────────────
@@ -493,7 +606,7 @@ export class CheckoutController {
   /** Opens a method's form (COLLECTING_DETAILS). */
   chooseMethod(id: string): void {
     const method = this.snapshot.methods.find((m) => m.id === id);
-    if (!method || method.limit || this.inFlight) return;
+    if (!method || method.limit || this.inFlight || this.abandoned()) return;
     this.choose(method);
   }
 
@@ -504,7 +617,7 @@ export class CheckoutController {
 
   /** "Change": back to the method list. */
   backToMethods(): void {
-    if (this.inFlight || this.snapshot.methods.length < 2) return;
+    if (this.inFlight || this.snapshot.methods.length < 2 || this.abandoned()) return;
     this.chosen = null;
     this.show({ name: 'methods' }, 'INITIATED', { banner: null, fieldErrors: {} });
   }
@@ -514,7 +627,8 @@ export class CheckoutController {
   /** Mobile Money: checked as the web does, then sent in E.164 with the operator hint. */
   async payMobileMoney(input: MobileMoneySubmission): Promise<void> {
     const method = this.snapshot.methods.find((m) => m.kind === 'mobile_money');
-    if (!method || method.kind !== 'mobile_money') return;
+    // Nothing is taken while the payment is being cancelled, or once the sheet closed.
+    if (!method || method.kind !== 'mobile_money' || this.abandoned()) return;
     const problem = validateMobileMoney(input.phone, input.country, this.choicesFor(input.country, method), input.choice?.id ?? null);
     // Sandbox test numbers do not follow real numbering plans: a mismatch never blocks there.
     const blocking = problem && !(problem.code === 'operator_mismatch' && this.transaction?.sandbox);
@@ -540,7 +654,7 @@ export class CheckoutController {
   /** Card through a hosted page, the sandbox test form, or a client session — by the method's flavour. */
   async payCard(fields: Record<string, string>): Promise<void> {
     const method = this.chosenCard();
-    if (!method) return;
+    if (!method || this.abandoned()) return;
     const missing = this.checkFields(method.flavor === 'sandbox_form' ? [...SANDBOX_CARD_FIELDS] : method.fields, fields);
     if (missing) return;
     if (method.flavor === 'client_session') {
@@ -561,7 +675,7 @@ export class CheckoutController {
 
   /** Stripe: Pay pressed. From now on the attempt is under way, while Stripe creates the PaymentMethod. */
   beginCardPayment(): void {
-    if (this.inFlight || this.settled || this.snapshot.busy) return;
+    if (this.inFlight || this.abandoned() || this.snapshot.busy) return;
     this.stripePressed = true;
     this.show(this.snapshot.screen, 'PROCESSING', { busy: true, banner: null, fieldErrors: {} });
   }
@@ -609,15 +723,9 @@ export class CheckoutController {
     return Object.keys(errors).length > 0;
   }
 
-  private async waitForAltcha(): Promise<AltchaSolution | null | 'failed'> {
-    if (!this.altcha) return null;
-    const solution = await this.altcha;
-    return solution ?? 'failed';
-  }
-
   /** One payment attempt: a new Idempotency-Key, POST /pay/process, its answer (README §9). */
   private async runAttempt(channel: string, method: string, data: Record<string, unknown>, phone: string | null = null): Promise<void> {
-    if (this.inFlight || this.settled || (this.snapshot.busy && !this.stripePressed)) return;
+    if (this.inFlight || this.abandoned() || (this.snapshot.busy && !this.stripePressed)) return;
     this.altchaRetried = false;
     const payload: Record<string, unknown> = { ...data };
     if (this.options.returnUrl) payload.return_url = this.options.returnUrl;
@@ -628,15 +736,15 @@ export class CheckoutController {
     }
     this.show(this.snapshot.screen, 'PROCESSING', { busy: true, banner: null, fieldErrors: {} });
     // Solved in the background since the session loaded; usually ready by now.
-    const altcha = await this.waitForAltcha();
+    const altcha = await this.solutionForPay();
     if (this.abandoned()) return;
     this.stripePressed = false;
-    if (altcha === 'failed') return this.fail(WajubError.create('security_check_failed', { lang: this.lang }));
+    if (altcha instanceof WajubError) return this.notSent(altcha);
     if (altcha) this.useAltcha(payload, altcha);
     // A request that never reached the API is sent again under its own key: if it did arrive after all, the API replays its answer.
     const key = this.reuseKey ?? newIdempotencyKey();
     this.reuseKey = null;
-    this.attempt = { endpoint: 'process', channel, method, key, startedAt: Date.now(), started: false, phone, data: payload };
+    this.attempt = { endpoint: 'process', channel, method, key, startedAt: monotonicNow(), started: false, phone, data: payload, baseline: this.knownErrorCode };
     this.inFlight = true;
     await this.send(this.attempt);
   }
@@ -678,6 +786,7 @@ export class CheckoutController {
     }
     if (body.transaction) this.transaction = { ...this.transaction, ...body.transaction };
     const status = body.transaction?.status ?? '';
+    if (status) this.knownStatus = status.toLowerCase();
     const ctx = body.transaction?.processing_context ?? {};
     this.update({ busy: false });
 
@@ -748,7 +857,7 @@ export class CheckoutController {
     if (status === null || status >= 500) {
       // No answer after the retries: the outcome is unknown, never shown as a
       // failure. A charge may be running — watch it.
-      this.unanswered = { key: attempt.key, sentAt: attempt.sentAt ?? Date.now() };
+      this.unanswered = { key: attempt.key, sentAt: attempt.sentAt ?? monotonicNow(), baseline: attempt.baseline };
       this.show({ name: 'pending', url: null, capped: false }, 'PENDING');
       this.watch(false);
       return;
@@ -772,16 +881,20 @@ export class CheckoutController {
       this.fail(WajubError.create('session_not_found', { lang: this.lang, httpStatus: status }));
       return;
     }
+    // A decline puts the payment back to pending with this code: what the status carries from now on.
+    if (status === 402) {
+      this.knownErrorCode = error.decline_code;
+      this.knownStatus = 'pending';
+    }
     this.fail(error.localized(this.lang));
   }
 
   /** 422: the form again, with its errors (README §9.1), or the Altcha retry (§15). */
   private async handleValidation(error: WajubError): Promise<void> {
-    const sentAltcha = this.attempt?.data.altcha !== undefined;
-    // The API refuses a solution without an error_code: a malformed one under `data.altcha`
-    // (or `altcha`), a wrong one only by its message — matched as a last resort.
+    // The API refuses a solution (or its absence) without an error_code: a malformed one under
+    // `data.altcha` (or `altcha`), a wrong or missing one only by its message — matched as a last resort.
     const altchaField = Object.keys(error.details ?? {}).some((k) => k === 'altcha' || k === 'data.altcha');
-    if (sentAltcha && (altchaField || /security challenge/i.test(error.api_message ?? ''))) {
+    if (altchaField || /security challenge/i.test(error.api_message ?? '')) {
       if (this.altchaRetried) {
         this.fail(WajubError.create('security_check_failed', { lang: this.lang }));
         return;
@@ -839,42 +952,22 @@ export class CheckoutController {
     const attempt = this.attempt;
     if (!attempt) return;
     this.update({ busy: true });
-    try {
-      const session = await this.client.getSession(this.token);
-      if (this.abandoned()) return;
-      this.altcha = null;
-      this.startAltcha(session);
-      const solution = await this.waitForAltcha();
-      if (this.abandoned()) return;
-      if (!solution || solution === 'failed') throw new Error('no solution');
-      // A new request after a definitive answer: a new key.
-      const data = { ...attempt.data };
-      this.useAltcha(data, solution);
-      this.attempt = { ...attempt, key: newIdempotencyKey(), data };
-      this.inFlight = true;
-      await this.send(this.attempt);
-    } catch {
-      if (this.abandoned()) return;
+    // A fresh challenge, whatever was fetched ahead: the API refused the last one (or its absence).
+    this.altchaOn = true;
+    this.altcha = this.fetchAltcha();
+    this.altchaAhead = false;
+    const solution = await this.solutionForPay();
+    if (this.abandoned()) return;
+    if (!solution || solution instanceof WajubError) {
       this.update({ busy: false });
-      this.fail(WajubError.create('security_check_failed', { lang: this.lang }));
+      return this.fail(solution instanceof WajubError && solution.code !== 'security_check_failed' ? solution : WajubError.create('security_check_failed', { lang: this.lang }));
     }
-  }
-
-  /** A solved challenge goes with one request only: the next attempt gets a new one. */
-  private useAltcha(data: Record<string, unknown>, solution: AltchaSolution): void {
-    data.altcha = solution;
-    this.refreshAltcha();
-  }
-
-  /** A new challenge, solved in the background for the next attempt. */
-  private refreshAltcha(): void {
-    this.altcha = null;
-    this.client.getSession(this.token).then(
-      (session) => {
-        if (!this.settled) this.startAltcha(session);
-      },
-      () => undefined,
-    );
+    // A new request after a definitive answer: a new key.
+    const data = { ...attempt.data };
+    this.useAltcha(data, solution);
+    this.attempt = { ...attempt, key: newIdempotencyKey(), data };
+    this.inFlight = true;
+    await this.send(this.attempt);
   }
 
   /**
@@ -890,11 +983,14 @@ export class CheckoutController {
       s = '';
     }
     if (this.settled || attempt !== this.attempt) return;
+    if (s) this.knownStatus = s;
     this.update({ busy: false });
     if (SUCCESS_STATUSES.includes(s)) return this.succeed({ ...this.transaction!, status: s }, attempt.method);
-    if (s === 'processing' || s === 'partial') {
+    // Under way (an attempt is running, money may move), or unreadable: PENDING, watched.
+    if (s === 'processing' || s === 'partial' || !s) {
+      if (!s) this.notProcessable = attempt;
       this.show({ name: 'pending', url: null, capped: false }, 'PENDING');
-      return this.watch(true);
+      return this.watch(Boolean(s));
     }
     this.inFlight = false;
     if (s === 'failed') return this.fail(WajubError.create('payment_failed', { lang: this.lang }));
@@ -933,12 +1029,12 @@ export class CheckoutController {
   }
 
   private async startClientSession(channel: string, fields: Record<string, string>): Promise<void> {
-    if (this.inFlight || this.settled || this.snapshot.busy) return;
+    if (this.inFlight || this.abandoned() || this.snapshot.busy) return;
     this.altchaRetried = false;
     this.show(this.snapshot.screen, 'PROCESSING', { busy: true, banner: null, fieldErrors: {} });
-    const altcha = await this.waitForAltcha();
+    const altcha = await this.solutionForPay();
     if (this.abandoned()) return;
-    if (altcha === 'failed') return this.fail(WajubError.create('security_check_failed', { lang: this.lang }));
+    if (altcha instanceof WajubError) return this.notSent(altcha);
     const data: Record<string, unknown> = {
       ...buildHostedCardRequest(fields as Partial<Record<HostedCardField, string>>),
       name: this.transaction?.customer?.name ?? null,
@@ -946,7 +1042,7 @@ export class CheckoutController {
     };
     if (this.restartClientSession) data.restart = true;
     if (altcha) this.useAltcha(data, altcha);
-    this.attempt = { endpoint: 'client_session', channel, method: 'card', key: newIdempotencyKey(), startedAt: Date.now(), started: false, phone: null, data };
+    this.attempt = { endpoint: 'client_session', channel, method: 'card', key: newIdempotencyKey(), startedAt: monotonicNow(), started: false, phone: null, data };
     this.inFlight = true;
     await this.send(this.attempt);
   }
@@ -987,21 +1083,35 @@ export class CheckoutController {
   /** The payer is back from the PSP's page: ask Wajub to check with the PSP. */
   private async completeClientSession(): Promise<void> {
     const id = this.clientSessionId;
-    if (!id || this.settled) return;
+    const attempt = this.attempt;
+    if (!id || this.settled || this.completing) return;
+    this.completing = true;
     try {
       const body = await this.client.completeClientSession(this.token, id);
-      if (this.settled) return;
+      if (this.settled || attempt !== this.attempt) return;
       if (body.transaction) this.transaction = { ...this.transaction, ...body.transaction };
-      if (SUCCESS_STATUSES.includes(body.transaction?.status ?? '')) this.succeed(this.transaction!, 'card');
-      // 202: not paid yet — the PSP's webhook settles it; the watch goes on.
+      if (SUCCESS_STATUSES.includes(body.transaction?.status ?? '')) return this.succeed(this.transaction!, 'card');
+      // 202: not paid yet — the PSP's webhook settles it; the watch goes on. A refusal a poll
+      // read meanwhile (`pending`, perhaps an earlier try's error_code) is not this answer's.
+      if (this.deferredOutcome?.kind === 'failed') {
+        this.deferredOutcome = null;
+        this.watch(true);
+      }
     } catch (e) {
-      if (this.settled || !(e instanceof WajubError)) return;
+      if (this.settled || attempt !== this.attempt || !(e instanceof WajubError)) return;
       if (e.http_status === 402 || (e.http_status === 422 && e.code === 'client_session_expired')) {
+        this.deferredOutcome = null;
         this.stopWatching();
         this.inFlight = false;
         this.clientSessionId = null;
-        this.fail(e.localized(this.lang));
+        return this.fail(e.localized(this.lang));
       }
+    } finally {
+      this.completing = false;
+      const deferred = this.deferredOutcome;
+      this.deferredOutcome = null;
+      // Not settled by the PSP's answer: what the watch saw stands.
+      if (deferred && !this.settled && attempt === this.attempt && !this.finished()) this.onWatchOutcome(deferred);
     }
   }
 
@@ -1089,7 +1199,7 @@ export class CheckoutController {
   /** Posts the step to its own endpoint (VERIFYING); never retried. */
   async submitStep(values: Record<string, string>): Promise<void> {
     const screen = this.snapshot.screen;
-    if (screen.name !== 'step' || this.snapshot.busy || this.settled) return;
+    if (screen.name !== 'step' || this.snapshot.busy || this.abandoned()) return;
     const step = screen.step;
     const body = this.stepBody(step, values);
     if (!body) return;
@@ -1113,6 +1223,8 @@ export class CheckoutController {
         this.emit('onError', refusal);
         return;
       }
+      // A definitive refusal: the payment is back to `pending`.
+      this.knownStatus = 'pending';
       this.stopWatching();
       this.inFlight = false;
       this.fail(refusal);
@@ -1152,7 +1264,7 @@ export class CheckoutController {
   /** "Resend": offered 60 s after the screen opened; the countdown restarts. */
   async resendStep(): Promise<void> {
     const screen = this.snapshot.screen;
-    if (this.settled || this.snapshot.busy) return;
+    if (this.abandoned() || this.snapshot.busy) return;
     if (screen.name === 'step') {
       const step = { ...screen.step, resendAt: Date.now() + UI_TIMINGS.resendAfterMs };
       this.update({ screen: { name: 'step', step } });
@@ -1167,7 +1279,7 @@ export class CheckoutController {
   /** The sandbox 3-D Secure email code (README §10.1). */
   async submit3ds(code: string): Promise<void> {
     const screen = this.snapshot.screen;
-    if (screen.name !== 'three_ds' || this.snapshot.busy || this.settled) return;
+    if (screen.name !== 'three_ds' || this.snapshot.busy || this.abandoned()) return;
     const value = code.trim();
     if (!/^[A-Za-z0-9]{4,8}$/.test(value)) {
       this.update({ fieldErrors: { code: WajubError.create(value ? 'invalid_code' : 'field_required', { lang: this.lang }).message } });
@@ -1212,9 +1324,9 @@ export class CheckoutController {
   private watch(seenProcessing: boolean): void {
     this.inFlight = true;
     if (this.watcher) return;
-    const attemptStart = this.attempt?.startedAt ?? Date.now();
-    const expires = this.transaction?.expires_at ? Date.parse(this.transaction.expires_at) : NaN;
-    const cap = attemptStart + POLLING.overallCapMs;
+    // 15 minutes of the monotonic clock from the attempt's start; never a server timestamp
+    // (`expires_at`) against the device's wall clock: the API's 410 says when the session is over.
+    const attemptStart = this.attempt?.startedAt ?? monotonicNow();
     this.watcher = new StatusWatcher({
       client: this.client,
       token: this.token,
@@ -1223,9 +1335,14 @@ export class CheckoutController {
       realtime: this.options.realtime,
       lang: this.lang,
       seenProcessing,
-      deadline: Number.isFinite(expires) && expires > Date.now() ? Math.min(cap, expires) : cap,
+      deadline: attemptStart + POLLING.overallCapMs,
       onOutcome: (outcome) => this.onWatchOutcome(outcome),
-      onStatus: (status) => this.checkUnanswered(status),
+      onStatus: (status) => {
+        this.knownStatus = status.status;
+        this.checkUnanswered(status);
+        this.checkNotProcessable(status);
+        this.knownErrorCode = status.error_code ?? null;
+      },
     });
     this.watcher.start();
   }
@@ -1237,18 +1354,25 @@ export class CheckoutController {
 
   /**
    * README §2.5: a request that got no answer, and a status still `pending`
-   * (never `processing`, no `error_code`) a minute after its last try — it
-   * most likely never reached the API. Back to the form; the next Pay sends
-   * it again under the same key.
+   * (never `processing`, no `error_code` other than the one it carried before
+   * the attempt — a refusal left by an earlier try is not news) a minute
+   * after its last try: it most likely never reached the API. Back to the
+   * form; the next Pay sends it again under the same key.
    */
   private checkUnanswered(status: PaymentStatus): void {
     const unanswered = this.unanswered;
     if (!unanswered || this.settled) return;
-    if (status.status !== 'pending' || status.error_code) {
+    if (status.status !== 'pending') {
+      // Processing (it reached the API) or an outcome, which the watch decides.
       this.unanswered = null;
       return;
     }
-    if (Date.now() - unanswered.sentAt < UI_TIMINGS.unansweredMs) return;
+    if (status.error_code && unanswered.baseline !== undefined && status.error_code !== unanswered.baseline) {
+      // A refusal newer than the attempt: it reached the API and was declined, nothing charged.
+      this.unanswered = null;
+      return this.fail(attemptEnded(status, this.lang));
+    }
+    if (monotonicNow() - unanswered.sentAt < UI_TIMINGS.unansweredMs) return;
     this.unanswered = null;
     this.stopWatching();
     this.inFlight = false;
@@ -1259,10 +1383,27 @@ export class CheckoutController {
     this.emit('onError', error);
   }
 
+  /** After a 400 whose status re-read said nothing: `pending` is what the re-read would have failed on. */
+  private checkNotProcessable(status: PaymentStatus): void {
+    const attempt = this.notProcessable;
+    if (!attempt || this.settled) return;
+    if (attempt !== this.attempt || status.status !== 'pending') {
+      this.notProcessable = null;
+      return;
+    }
+    this.notProcessable = null;
+    this.fail(WajubError.create('not_processable', { lang: this.lang, httpStatus: 400 }));
+  }
+
   private onWatchOutcome(outcome: WatchOutcome): void {
     this.watcher = null;
     if (this.settled) return;
     if (outcome.kind === 'ended') return;
+    // The PSP's answer is being checked: a poll's refusal (perhaps an earlier try's) waits for it.
+    if (this.completing && outcome.kind !== 'success' && outcome.kind !== 'cap') {
+      this.deferredOutcome = outcome;
+      return;
+    }
     if (outcome.kind === 'cap') {
       // "Payment in progress — you will be notified": closing resolves processing.
       this.show({ name: 'pending', url: this.pendingUrl, capped: true }, 'PENDING', { busy: false });
@@ -1281,6 +1422,7 @@ export class CheckoutController {
 
   /** Paid: the session read once more for its receipt and end time (best effort). */
   private async succeedAfterWatch(): Promise<void> {
+    const attempt = this.attempt;
     let transaction: SessionTransaction = { ...this.transaction!, status: 'succeeded' };
     try {
       const session = await this.client.getSession(this.token);
@@ -1288,13 +1430,16 @@ export class CheckoutController {
     } catch {
       /* the transaction already known will do */
     }
-    if (!this.settled && !this.finished()) this.succeed(transaction, this.attempt?.method ?? 'unknown');
+    // A success wins over a failure shown for this same attempt meanwhile.
+    if (this.settled || attempt !== this.attempt || (this.finished() && this.snapshot.screen.name !== 'failed')) return;
+    this.succeed(transaction, attempt?.method ?? 'unknown');
   }
 
   // ── outcomes ───────────────────────────────────────────────────────────────
 
   private succeed(transaction: SessionTransaction, method: string): void {
-    if (this.settled || this.finished()) return;
+    // A success wins over a failure shown for the same attempt (one read from a provisional status).
+    if (this.settled || this.snapshot.screen.name === 'success') return;
     this.stopWatching();
     this.inFlight = false;
     this.transaction = transaction;
@@ -1316,6 +1461,18 @@ export class CheckoutController {
     this.emit('onError', error);
   }
 
+  /**
+   * Nothing was sent: no Altcha solution could be had (its challenge did not
+   * load, or could not be solved). The form again with a retryable banner;
+   * the next Pay asks for a challenge again.
+   */
+  private notSent(error: WajubError): void {
+    if (this.settled || this.finished()) return;
+    this.inFlight = false;
+    this.show(this.snapshot.screen, 'COLLECTING_DETAILS', { busy: false, banner: error });
+    this.emit('onError', error);
+  }
+
   /** EXPIRED or CANCELLED (a `cancelled` status seen): final for the sheet. */
   private end(name: 'expired' | 'cancelled', error: WajubError): void {
     if (this.settled || this.finished()) return;
@@ -1328,7 +1485,7 @@ export class CheckoutController {
   /** "Try again" on the failure screen: the same method's form, a new key on the next Pay. */
   tryAgain(): void {
     const screen = this.snapshot.screen;
-    if (screen.name !== 'failed' || !screen.error.retryable || this.settled) return;
+    if (screen.name !== 'failed' || !screen.error.retryable || this.abandoned()) return;
     if (screen.error.code === 'security_check_failed') this.altchaRetried = false;
     if (this.attempt?.endpoint === 'client_session') this.restartClientSession = true;
     this.attempt = null;
@@ -1344,7 +1501,7 @@ export class CheckoutController {
 
   /** "Cancel payment": cancelled for good on Wajub (`payer_cancelled`). */
   async cancelPayment(): Promise<void> {
-    if (!this.snapshot.canCancel || this.settled) return;
+    if (!this.snapshot.canCancel || this.abandoned()) return;
     this.update({ cancelling: true, busy: true });
     try {
       const { redirect_url } = await this.client.cancel(this.token);
@@ -1368,6 +1525,7 @@ export class CheckoutController {
       status = '';
     }
     if (this.settled) return;
+    if (status) this.knownStatus = status;
     this.update({ cancelling: false, busy: false });
     // Refused, and the status unknown: the payment may be under way.
     if (!status) return this.settle(this.processingResult());
@@ -1413,6 +1571,14 @@ export class CheckoutController {
   /** What closing the sheet now means, when no API call is involved; null for "cancel first". */
   private closingResult(reason: 'dismissed' | 'host_gone'): CheckoutResult | null {
     const screen = this.snapshot.screen;
+    // The session answered, its screen not up yet (sdk-config still coming): its status decides at once.
+    if (!this.ready && this.knownStatus && this.transaction) {
+      const status = this.knownStatus;
+      if (SUCCESS_STATUSES.includes(status)) return { status: 'complete', payment: this.paymentOf(this.transaction, 'unknown'), transaction: this.transaction };
+      const ended = TERMINAL_AT_LOAD[status];
+      if (ended) return { status: 'failed', error: WajubError.create(ended, { lang: this.lang }), transaction: this.transaction };
+      if (status === 'processing' || status === 'partial') return this.processingResult();
+    }
     if (screen.name === 'success') return { status: 'complete', payment: screen.payment, transaction: this.transaction! };
     if (screen.name === 'failed' || screen.name === 'expired' || screen.name === 'cancelled' || screen.name === 'load_error') {
       return { status: 'failed', error: screen.error, transaction: this.transaction };
@@ -1436,9 +1602,16 @@ export class CheckoutController {
   dismiss = (): void => {
     if (this.settled || this.snapshot.cancelling) return;
     const result = this.closingResult('dismissed');
-    if (result) return this.settle(result);
-    // Nothing known of the payment yet: no blind cancel.
-    if (this.options.cancelOnDismiss === false || !this.sessionKnown) return this.settle(this.cancelled('dismissed', null));
+    if (result) {
+      // A failure the payer closes: `failed`, with the error they saw. A payment that may be
+      // cancelled is cancelled too, so the order is released — no onCancel (README §14).
+      if (this.snapshot.screen.name === 'failed' && this.options.cancelOnDismiss !== false && this.mayCancel()) {
+        this.client.cancel(this.token).catch(() => undefined);
+      }
+      return this.settle(result);
+    }
+    // Nothing known of the payment yet, or a payment that must not be cancelled: no call.
+    if (this.options.cancelOnDismiss === false || !this.mayCancel()) return this.settle(this.cancelled('dismissed', null));
     // Before any attempt: the payer left, the payment is cancelled on Wajub too.
     this.update({ visible: false, cancelling: true });
     this.stopTimers();
@@ -1470,7 +1643,7 @@ export class CheckoutController {
     this.stopTimers();
     this.stopWatching();
     this.loadAbort?.abort();
-    this.altchaAbort.aborted = true;
+    this.altchaSolves.forEach((signal) => (signal.aborted = true));
     this.appState?.remove();
     this.appState = null;
     this.update({ visible: false, busy: false, cancelling: false });

@@ -1,8 +1,10 @@
 import { AppState } from 'react-native';
 
+import { monotonicNow } from '../../clock';
 import type { PayClient } from '../../client/payClient';
 import { decideStatus, POLLING, realtimeConfig, StatusWatcher } from '../../checkout/watcher';
 import type { WatchOutcome } from '../../checkout/watcher';
+import { operatorChoices } from '../../mobileMoney/form';
 import { makeController } from '../../test/checkout';
 import { body, fakeApi, fixture, settle } from '../../test/fakeApi';
 import type { FakeApi } from '../../test/fakeApi';
@@ -40,7 +42,7 @@ function watch(
     realtime: options.realtime,
     lang: 'en',
     seenProcessing: options.seenProcessing ?? true,
-    deadline: options.deadline ?? Date.now() + POLLING.overallCapMs,
+    deadline: options.deadline ?? monotonicNow() + POLLING.overallCapMs,
     onOutcome: (o) => outcomes.push(o),
   });
   watchers.push(watcher);
@@ -108,12 +110,49 @@ describe('WT — watching', () => {
 
     // The 15-minute cap: polling stops, the outcome is "still processing".
     const capped = client(() => processing);
-    const { outcomes } = watch(capped.client, { deadline: Date.now() + POLLING.overallCapMs });
+    const { outcomes } = watch(capped.client, { deadline: monotonicNow() + POLLING.overallCapMs });
     await jest.advanceTimersByTimeAsync(POLLING.overallCapMs);
     expect(outcomes).toEqual([{ kind: 'cap' }]);
     const polls = capped.getStatus.mock.calls.length;
     await jest.advanceTimersByTimeAsync(60_000);
     expect(capped.getStatus).toHaveBeenCalledTimes(polls);
+  });
+
+  it('WT-01 caps the watch on the monotonic clock, never on expires_at', async () => {
+    jest.useFakeTimers();
+    // The device's clock runs ahead of the server's: `expires_at` looks 20 s away.
+    const session = body('session-cm-aggregate');
+    session.transaction.expires_at = new Date(Date.now() + 20_000).toISOString();
+    api = fakeApi({
+      'GET /pay/session': { status: 200, body: session },
+      'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+      'POST /pay/process': 'process-processing-mobile-money-live',
+      'GET /pay/status': 'status-processing',
+    });
+    const { controller } = makeController();
+    controller.start();
+    await settle();
+    controller.chooseMethod('mobile_money');
+    const mtn = operatorChoices(controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+    await controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+    await settle();
+    expect(controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(controller.getSnapshot().screen.name).toBe('approval');
+    const polls = api.callsTo('GET /pay/status').length;
+    expect(polls).toBeGreaterThanOrEqual(10);
+    // The wall clock is set an hour forward: the watch goes on.
+    jest.setSystemTime(Date.now() + 3_600_000);
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(controller.getSnapshot().screen.name).toBe('approval');
+    expect(api.callsTo('GET /pay/status').length).toBeGreaterThan(polls);
+
+    // 15 minutes of the monotonic clock from the attempt's start: "in progress", closing resolves processing.
+    await jest.advanceTimersByTimeAsync(POLLING.overallCapMs - 90_000);
+    expect(controller.getSnapshot()).toMatchObject({ state: 'PENDING', screen: { name: 'pending', capped: true } });
+    controller.dismiss();
+    await expect(controller.result).resolves.toMatchObject({ status: 'processing' });
   });
 
   it('WT-02 decides on status', async () => {
