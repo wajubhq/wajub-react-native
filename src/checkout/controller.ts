@@ -644,7 +644,8 @@ export class CheckoutController {
     const method = this.snapshot.methods.find((m) => m.kind === 'mobile_money');
     // Nothing is taken while the payment is being cancelled, or once the sheet closed.
     if (!method || method.kind !== 'mobile_money' || this.abandoned()) return;
-    const problem = validateMobileMoney(input.phone, input.country, this.choicesFor(input.country, method), input.choice?.id ?? null);
+    const sandbox = this.transaction?.sandbox === true;
+    const problem = validateMobileMoney(input.phone, input.country, this.choicesFor(input.country, method), input.choice?.id ?? null, sandbox);
     // Sandbox test numbers do not follow real numbering plans: a mismatch never blocks there.
     const blocking = problem && !(problem.code === 'operator_mismatch' && this.transaction?.sandbox);
     if (problem && blocking) {
@@ -657,8 +658,8 @@ export class CheckoutController {
     }
     const choice = input.choice;
     if (!choice) return;
-    const detected = detectOperator(input.phone, input.country);
-    const data = mobileMoneyRequestData(input.phone, input.country, operatorHint(choice, input.pickedByHand, detected));
+    const detected = detectOperator(input.phone, input.country, sandbox);
+    const data = mobileMoneyRequestData(input.phone, input.country, operatorHint(choice, input.pickedByHand, detected), sandbox);
     await this.runAttempt(choice.channel, 'mobile_money', data, data.phone);
   }
 
@@ -966,7 +967,7 @@ export class CheckoutController {
       const choices = this.choicesFor(country, method);
       const named = /belongs to \w+ \(\w+\.(\w+)\)/i.exec(apiMessage)?.[1]?.toLowerCase();
       // The API's carrier lookup first; the prefix rules when its message names none.
-      const detectedId = named || (attempt?.phone ? detectOperator(attempt.phone, country) : null);
+      const detectedId = named || (attempt?.phone ? detectOperator(attempt.phone, country, this.transaction?.sandbox === true) : null);
       const detected = choices.find((c) => c.id === detectedId);
       const selected = choices.find((c) => c.channel === attempt?.channel && (!c.viaAggregate || c.id === attempt?.data.operator));
       if (detected && selected) {

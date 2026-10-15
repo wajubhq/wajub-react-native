@@ -51,7 +51,8 @@ export function MobileMoneyForm({
   }, [choices]);
 
   const rules = countryRules(country);
-  const detected = detectOperator(phone, country);
+  const sandbox = session.transaction.sandbox === true;
+  const detected = detectOperator(phone, country, sandbox);
   const detectedChoice = choices.find((c) => c.id === detected);
   const selectedChoice = choices.find((c) => c.id === selected) ?? null;
 
@@ -73,7 +74,7 @@ export function MobileMoneyForm({
   const onPhone = (value: string) => {
     const formatted = formatAsYouType(value);
     setPhone(formatted);
-    setSelected((current) => preselect(current, pickedByHand, formatted, country, choices));
+    setSelected((current) => preselect(current, pickedByHand, formatted, country, choices, sandbox));
   };
   const total = session.transaction.amount_total ?? session.transaction.amount;
 

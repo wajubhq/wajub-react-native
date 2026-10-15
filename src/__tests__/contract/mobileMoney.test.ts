@@ -11,6 +11,7 @@ import {
   mobileMoneyData,
   nationalDigits,
   operatorLabel,
+  sandboxTestNumber,
   toE164,
 } from '../../mobileMoney/data';
 import { operatorChoices, operatorHint, preselect, validateMobileMoney } from '../../mobileMoney/form';
@@ -57,8 +58,43 @@ describe('MM — Mobile Money', () => {
       expect([v.input, formatAsYouType(v.input)]).toEqual([v.input, v.formatted]);
     }
     // A country outside the tables keeps an international number valid E.164.
-    expect(toE164('+260971234567', 'ZM')).toBe('+260971234567');
-    expect(toE164('00260 97 123 4567', 'ZM')).toBe('+260971234567');
+    expect(toE164('+33612345678', 'FR')).toBe('+33612345678');
+    expect(toE164('0033 6 12 34 56 78', 'FR')).toBe('+33612345678');
+  });
+
+  it('MM-10 takes the sandbox test numbers', async () => {
+    for (const v of vectors.sandbox_numbers) {
+      const test = sandboxTestNumber(v.input, v.country);
+      expect([v.input, v.country, test]).toEqual([v.input, v.country, v.operator ? { operator: v.operator, e164: v.e164 } : null]);
+      if (!v.operator) continue;
+      // In a sandbox session: valid, the prefix's operator, sent as read.
+      expect([v.input, isValidNumber(v.input, v.country, true)]).toEqual([v.input, true]);
+      expect([v.input, detectOperator(v.input, v.country, true)]).toEqual([v.input, v.operator]);
+      expect([v.input, toE164(v.input, v.country, true)]).toEqual([v.input, v.e164]);
+      // Outside one, the prefixes mean nothing: the numbering plan decides.
+      expect([v.input, detectOperator(v.input, v.country, false)]).toEqual([v.input, detectOperator(v.input, v.country)]);
+      expect([v.input, toE164(v.input, v.country, false)]).toEqual([v.input, toE164(v.input, v.country)]);
+    }
+    expect(isValidNumber('+229900000000', 'BJ')).toBe(false);
+    expect(isValidNumber('+229900000000', 'BJ', true)).toBe(true);
+
+    // Through the sheet: a test number the plan refuses goes out as read in a sandbox session…
+    const sandbox = await sheet('session-sandbox-cm', 'process-processing-mobile-money-sandbox');
+    const mtn = operatorChoices(sandbox.controller.getSnapshot().session!.channels, 'CM', 'en').find((c) => c.id === 'mtn')!;
+    await sandbox.controller.payMobileMoney({ phone: '+2376700000000', country: 'CM', choice: mtn, pickedByHand: true });
+    await settle();
+    expect(api.callsTo('POST /pay/process')[0].body.data).toMatchObject({ phone: '+2376700000000', country: 'CM' });
+    sandbox.controller.hostGone();
+    api.restore();
+
+    // …and is refused in a live one.
+    const live = await sheet('session-cm-aggregate', 'process-processing-mobile-money-live', { locale: 'en' });
+    const liveMtn = operatorChoices(live.controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+    await live.controller.payMobileMoney({ phone: '+2376700000000', country: 'CM', choice: liveMtn, pickedByHand: true });
+    await settle();
+    expect(api.callsTo('POST /pay/process')).toHaveLength(0);
+    expect(live.controller.getSnapshot().fieldErrors.phone).toBeTruthy();
+    live.controller.hostGone();
   });
 
   it('MM-02 matches the mismatch vectors', () => {
@@ -160,8 +196,9 @@ describe('MM — Mobile Money', () => {
 
   it('MM-09 loads the shared data file', () => {
     expect(mobileMoneyData()).toBe(loadMobileMoneyData(rawData));
-    expect(mobileMoneyData().schema_version).toBe(1);
-    expect(() => loadMobileMoneyData({ ...rawData, schema_version: 2 })).toThrow(/schema_version/);
+    expect(mobileMoneyData().schema_version).toBe(2);
+    expect(() => loadMobileMoneyData({ ...rawData, schema_version: 1 })).toThrow(/schema_version/);
+    expect(() => loadMobileMoneyData({ ...rawData, schema_version: 3 })).toThrow(/schema_version/);
     expect(() => loadMobileMoneyData(null)).toThrow(/schema_version/);
 
     // No second copy of the tables in code: no brand colour, no dial code, no prefix list.

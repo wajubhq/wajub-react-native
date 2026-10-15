@@ -94,9 +94,16 @@ export function operatorChoices(channels: SessionChannel[], country: string, lan
  * The selection after the number changed: a detected operator among the
  * choices, while the payer has not picked one by hand; otherwise unchanged.
  */
-export function preselect(current: string | null, pickedByHand: boolean, phone: string, country: string, choices: OperatorChoice[]): string | null {
+export function preselect(
+  current: string | null,
+  pickedByHand: boolean,
+  phone: string,
+  country: string,
+  choices: OperatorChoice[],
+  sandbox = false,
+): string | null {
   if (pickedByHand) return current;
-  const detected = detectOperator(phone, country);
+  const detected = detectOperator(phone, country, sandbox);
   return detected && choices.some((c) => c.id === detected) ? detected : current;
 }
 
@@ -115,12 +122,19 @@ export type MobileMoneyProblem =
 /**
  * What stops this number from being sent, in the web's order: empty,
  * invalid, a number of another offered operator (never for a wallet held
- * whatever the operator), no operator.
+ * whatever the operator), no operator. `sandbox`: a sandbox session, where
+ * the test numbers are valid and name their operator.
  */
-export function validateMobileMoney(phone: string, country: string, choices: OperatorChoice[], selected: string | null): MobileMoneyProblem | null {
+export function validateMobileMoney(
+  phone: string,
+  country: string,
+  choices: OperatorChoice[],
+  selected: string | null,
+  sandbox = false,
+): MobileMoneyProblem | null {
   if (!phone.trim()) return { code: 'phone_required' };
-  if (!isValidNumber(phone, country)) return { code: 'invalid_phone' };
-  const detected = detectOperator(phone, country);
+  if (!isValidNumber(phone, country, sandbox)) return { code: 'invalid_phone' };
+  const detected = detectOperator(phone, country, sandbox);
   const detectedChoice = choices.find((c) => c.id === detected);
   const selectedChoice = choices.find((c) => c.id === selected);
   if (detectedChoice && selectedChoice && detected !== selected && !isOperatorIndependent(selectedChoice.id)) {
@@ -146,9 +160,12 @@ export function operatorHint(choice: OperatorChoice, pickedByHand: boolean, dete
   return choice.viaAggregate && (pickedByHand || detected === choice.id) ? choice.id : null;
 }
 
-/** `data` for `/pay/process`: the number in E.164, the form's country, the hint when there is one. */
-export function mobileMoneyRequestData(phone: string, country: string, operator: string | null): Record<string, string> {
-  const data: Record<string, string> = { phone: toE164(phone, country), country: country.toUpperCase() };
+/**
+ * `data` for `/pay/process`: the number in E.164 (a sandbox session's test
+ * number as it was read), the form's country, the hint when there is one.
+ */
+export function mobileMoneyRequestData(phone: string, country: string, operator: string | null, sandbox = false): Record<string, string> {
+  const data: Record<string, string> = { phone: toE164(phone, country, sandbox), country: country.toUpperCase() };
   if (operator) data.operator = operator;
   return data;
 }
