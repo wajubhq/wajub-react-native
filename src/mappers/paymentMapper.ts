@@ -12,7 +12,7 @@ import { WajubError } from '../WajubError';
 import type { Lang } from '../errorCatalogue';
 import type { RawProcessBody } from '../wire/parse';
 
-/** 2xx body of /pay/process and the client-session calls. */
+/** A payment attempt's answer, before it is read. */
 export type RawProcessResponse = RawProcessBody;
 
 const SUCCESS_STATUSES = new Set(['success', 'successful', 'succeeded', 'paid', 'complete']);
@@ -26,10 +26,8 @@ export function buildMobileMoneyRequest(input: MobileMoneyInput): Record<string,
 }
 
 /**
- * A `wallet` channel the SDK can pay with a single tap — nothing to collect,
- * `/pay/process` answers with a redirect to the wallet's own page/app (e.g.
- * Djamo). Apple Pay / Google Pay / PayPal-via-Stripe need their own SDK
- * flavor and are excluded by `sdk: "form"` + no `required_fields`.
+ * A `wallet` method the SDK can pay with a single tap: nothing to collect,
+ * the payment opens the wallet's own page or app.
  */
 export function isRedirectWalletChannel(channel: SessionChannel, config: SdkChannelConfig | undefined): boolean {
   return (
@@ -44,7 +42,7 @@ export function isHostedCardField(field: string): field is HostedCardField {
   return (HOSTED_CARD_FIELDS as readonly string[]).includes(field);
 }
 
-/** Why a hosted-redirect billing value can't be sent yet, or null when it's fine. */
+/** Why a billing value a card payment asks for can't be sent yet, or null when it's fine. */
 export function hostedCardFieldError(field: HostedCardField, value: string | undefined): string | null {
   const v = (value ?? '').trim();
   if (!v) return 'Required';
@@ -54,7 +52,7 @@ export function hostedCardFieldError(field: HostedCardField, value: string | und
   return null;
 }
 
-/** `data` for a hosted-redirect card charge — flat keys, exactly as sdk-config names them. */
+/** `data` for a card paid on the provider's page, from the billing fields it asks for. */
 export function buildHostedCardRequest(billing: Partial<Record<HostedCardField, string>>): Record<string, string> {
   const data: Record<string, string> = {};
   for (const field of HOSTED_CARD_FIELDS) {
@@ -65,10 +63,9 @@ export function buildHostedCardRequest(billing: Partial<Record<HostedCardField, 
 }
 
 /**
- * One `/pay/process` answer, read the 1.4 way: the 1.4 `WajubSession`
- * methods return it, and keep doing so. A step this reading cannot perform
- * (`confirm_otp`…) fails as `unsupported_action`; `mapProcessOutcome()` is
- * spec v2's reading, which returns it.
+ * A payment attempt's answer, read the 1.4 way, as the 1.4 `WajubSession`
+ * methods return it. A confirmation step (`confirm_otp`…) fails as
+ * `unsupported_action` here; `mapProcessOutcome()` returns it.
  */
 export function mapProcessResponse(body: RawProcessResponse, methodType: string): PaymentResult {
   const txn = body.transaction;
@@ -160,11 +157,10 @@ const STEP_FIELDS: Record<string, [keyof RawProcessBody, keyof RawProcessBody]> 
 };
 
 /**
- * One 2xx of `/pay/process` or `/pay/client-session`, spec v2's way (README
- * §9): `action` and `transaction.status` decide, never `message`. The
- * confirmation steps come with their `stepId` and `hint`; an action the SDK
- * cannot perform, or one without what it needs, is `failed` /
- * `unsupported_action` (the payment may still be processing).
+ * A payment attempt's answer, as `WajubSession.submit()` reads it. A
+ * confirmation step comes with its `stepId` and `hint`; a step the SDK cannot
+ * perform is `failed` / `unsupported_action` (the payment may still be
+ * processing).
  */
 export function mapProcessOutcome(body: RawProcessResponse, methodType: string, lang: Lang = 'en'): ProcessOutcome {
   const transaction = body.transaction ?? null;
@@ -199,7 +195,7 @@ export function mapProcessOutcome(body: RawProcessResponse, methodType: string, 
   };
 }
 
-/** A status (`GET /pay/status`, realtime) as a `PaymentResult`, the 1.4 way. */
+/** A payment status as a `PaymentResult`, the 1.4 way. */
 export function mapStatusToResult(status: string, transaction: SessionTransaction): PaymentResult {
   const normalized = status.toLowerCase();
   if (SUCCESS_STATUSES.has(normalized)) {

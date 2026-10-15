@@ -3,7 +3,7 @@ import type { PaymentResult } from './types';
 import { openHostedRedirect } from './adapters/hostedRedirect';
 
 /**
- * Handles post-process actions natively — redirect / 3DS open the system browser, never WebView.
+ * Follows what a payment's answer asks for: a provider's page or 3-D Secure opens in the system browser, never a WebView.
  */
 export async function handlePaymentAction(
   session: WajubSession,
@@ -28,7 +28,7 @@ export async function handlePaymentAction(
   return result;
 }
 
-/** Opens a hosted-redirect channel URL directly (sdk-config `hosted_redirect`). */
+/** Opens a provider's card page in the system browser. */
 export async function openHostedRedirectUrl(url: string): Promise<boolean> {
   return openHostedRedirect(url);
 }

@@ -88,7 +88,7 @@ export class WajubError extends Error implements WajubErrorShape {
     Object.defineProperty(this, 'context', { value: context ?? null, enumerable: false });
   }
 
-  /** The spec's plain shape (errors.md §1). */
+  /** The plain shape, for logs and JSON. */
   toJSON(): WajubErrorJSON {
     return {
       name: 'WajubError',
@@ -119,7 +119,7 @@ export class WajubError extends Error implements WajubErrorShape {
     return new WajubError({ ...this.shape(), message: messageFor(this.code, lang, context) }, context);
   }
 
-  /** An error of the catalogue (errors.md §3), with its type, retryability and message. */
+  /** An error by its code, with its type, retryability and message. */
   static create(
     code: string,
     options: {
@@ -149,8 +149,8 @@ export class WajubError extends Error implements WajubErrorShape {
   }
 
   /**
-   * An API error answer mapped by errors.md §2. `phase` tells a 403 at load
-   * (not a payment session) from one during payment (a merchant restriction).
+   * The error of one of Wajub's error answers. `phase` tells a refusal while
+   * the payment loads from one while it is paid.
    */
   static fromResponse(input: {
     status: number;
@@ -193,7 +193,7 @@ export class WajubError extends Error implements WajubErrorShape {
     );
   }
 
-  /** A confirmation step's HTTP 200 `{status: "failed", attempts_remaining, error}`. */
+  /** A confirmation step refused (a wrong code, too many attempts, expired). */
   static fromStepFailure(
     failure: { attempts_remaining: number | null; error: { code: string; message: string } },
     lang: Lang = 'en',
@@ -225,8 +225,8 @@ export class WajubError extends Error implements WajubErrorShape {
   }
 
   /**
-   * @deprecated The 1.4 mapping, kept as it was. The SDK itself maps answers
-   * with `WajubError.fromResponse()` (spec errors.md §2).
+   * @deprecated The 1.4 mapping, kept as it was. Use
+   * `WajubError.fromResponse()`.
    */
   static fromHttp(
     status: number,

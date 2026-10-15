@@ -1,16 +1,13 @@
-/** Fixed Wajub API origin — not configurable. */
+/** Wajub's API origin. */
 export const API_URL = 'https://api.wajub.com';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Wire: GET /pay/sdk-config
+// How each payment method is paid
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * `paystack_inline` / `flutterwave_inline` are legacy values the API no
- * longer sends — Paystack/Flutterwave cards go through `client_session`.
- * `adyen_custom_card` needs Adyen's own client-side encryption, which this
- * SDK doesn't embed: treated as unavailable. The API may send other values
- * (`psp_inline`…): the sheet hides a card it cannot draw.
+ * How a payment method collects its details. The sheet offers the ones it can
+ * draw and hides the others; other values may come.
  */
 export type SdkFlavor =
   | 'form'
@@ -22,43 +19,40 @@ export type SdkFlavor =
 
 export interface SdkChannelConfig {
   available: boolean;
-  /** Prediction only — the pinned provider is `ClientSession.provider`. */
+  /** The provider expected to carry the payment, when known. */
   provider: string | null;
   sdk: SdkFlavor | null;
   publishable_key: string | null;
   required_fields: string[];
-  /** true → `startClientSession()` can hand this channel to the PSP's own
-   *  hosted checkout (PIN/OTP/AVS handled by the PSP). Absent = false. */
+  /** `true`: `startClientSession()` opens the provider's own checkout for this method. */
   client_session?: boolean;
-  /** Web clients only: ignored. */
+  /** For web pages: ignored here. */
   inline?: string;
-  /** Web clients only: ignored. */
+  /** For web pages: ignored here. */
   testmode?: boolean;
 }
 
 export interface SdkConfig {
-  /** Keyed by raw slug (`cm.mtn`, `cm.orange` — never `cm.mobile`). Over-returns. */
+  /** By payment method slug. */
   channels: Record<string, SdkChannelConfig>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Wire: client sessions
+// The provider's own checkout
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * PSP-hosted checkout session (POST /pay/client-session). Default flow:
- * open `hosted_url` in the system browser, then `completeClientSession(id)`
- * when the payer returns. Apps may instead launch the PSP's native SDK
- * themselves — Paystack Android/Flutter (`public_key` + `access_code`),
- * Flutterwave Android (`public_key` + `encryption_key`, `reference` as
- * tx_ref) — and call `completeClientSession(id)` the same way.
+ * A card checkout run by the payment's provider: open `hosted_url` in the
+ * system browser, then call `completeClientSession(id)` when the payer comes
+ * back. An app that launches the provider's own SDK with these values calls
+ * `completeClientSession(id)` the same way.
  */
 export interface ClientSession {
   id: string;
   provider: string;
-  /** PSP-side reference (Paystack `reference`, Flutterwave `tx_ref`). */
+  /** The provider's reference for this checkout. */
   reference?: string;
-  /** In the PSP's own units (Paystack: subunit; Flutterwave: major). */
+  /** In the provider's own units. */
   amount?: number;
   currency?: string;
   hosted_url?: string;
@@ -70,14 +64,14 @@ export interface ClientSession {
 }
 
 export interface ClientSessionOptions {
-  /** Required by Paystack/Flutterwave when the transaction has no customer email. */
+  /** Needed when the payment has no customer email. */
   email?: string | null;
   name?: string | null;
-  /** http(s) URL the PSP's hosted page redirects to after payment (e.g. a universal/app link). */
+  /** An `https` universal or app link the provider's page sends the payer back to. */
   return_url?: string | null;
-  /** Replace a session that died on the PSP side (the old one is re-verified first). */
+  /** Start a new checkout in place of one that expired at the provider. */
   restart?: boolean;
-  /** Billing fields the provider lists in sdk-config `required_fields`. */
+  /** Billing fields the payment method asks for (`required_fields`). */
   first_name?: string | null;
   last_name?: string | null;
   phone?: string | null;
@@ -87,17 +81,16 @@ export interface ClientSessionOptions {
   country?: string | null;
   state?: string | null;
   zip_code?: string | null;
-  /** The solved Altcha challenge, when the session carries one. */
+  /** The security check's answer, when the payment asks for one. */
   altcha?: AltchaSolution | null;
 }
 
-/** Error code for an API `action` this SDK can't perform natively — see mapProcessResponse(). */
+/** Error code for a payment step this SDK cannot perform — see mapProcessResponse(). */
 export const UNSUPPORTED_ACTION_CODE = 'unsupported_action';
 
 /**
- * Contact/billing fields a `hosted_redirect` card PSP may still need before
- * it opens its page — sdk-config lists the missing ones in `required_fields`
- * (Kkiapay/FedaPay/PayDunya: `email`; CinetPay: `first_name` … `zip_code`).
+ * Contact and billing fields a card payment may ask for before the
+ * provider's page opens: the method's `required_fields` lists them.
  */
 export type HostedCardField =
   | 'first_name'
@@ -123,7 +116,7 @@ export const HOSTED_CARD_FIELDS: readonly HostedCardField[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Wire: GET /pay/session
+// The payment
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Present only while the payment is `processing` or `partial`. */
@@ -134,9 +127,9 @@ export interface ProcessingContext {
   is_bank_transfer?: boolean;
   /** English. May hold a USSD fallback ("dial *126#"). */
   payer_instruction?: string | null;
-  /** PSP page to reopen (redirect restore). */
+  /** The provider's page, to reopen. */
   action_url?: string | null;
-  /** Sandbox 3-D Secure email challenge restore. */
+  /** The sandbox 3-D Secure email code under way. */
   three_ds_id?: string | null;
   three_ds_method?: string | null;
   masked_email?: string | null;
@@ -153,9 +146,9 @@ export interface TransactionFee {
 
 /** Major units: 25000 for 25 000 XAF, 49.9 for 49.90 EUR. */
 export interface SessionTransaction {
-  /** Wajub's payment id: `trx_…` / `trx_test_…`. Realtime channel suffix. */
+  /** Wajub's payment id: `trx_…` / `trx_test_…`. */
   id: string;
-  /** The merchant's reference (= trxref). NOT the `reference` of GET /pay/status. */
+  /** The merchant's reference (= trxref). Not the `reference` of `PaymentStatus`, which is the payment's id. */
   reference: string;
   trxref?: string | null;
   amount: number;
@@ -221,19 +214,18 @@ export interface SessionChannel {
   operators?: ChannelOperator[];
 }
 
-/** Realtime (Pusher protocol): Wajub's Reverb, or hosted Pusher. */
+/** The payment's live status updates; the SDK uses them on its own. */
 export interface EchoConfig {
-  /** Empty when broadcasting is not configured: polling only. */
+  /** Empty when the payment has none. */
   key: string;
-  /** Scheme included: "wss://ws.wajub.com", "wss://ws-eu.pusher.com", "ws://localhost". */
+  /** Scheme included. */
   ws_host: string;
   ws_port: number;
-  /** "private-payment." */
   channel_prefix: string;
   broadcaster: string;
 }
 
-/** The merchant's branding. Three sources with slightly different key sets: every key optional. */
+/** The merchant's branding. Every key is optional. */
 export interface Branding {
   primary_color?: string | null;
   secondary_color?: string | null;
@@ -249,7 +241,7 @@ export interface Branding {
   appearance_mode?: string | null;
   density?: string | null;
   locale?: string | null;
-  /** A boolean from the API; the web also accepts an object. */
+  /** `true`: no "Secured by Wajub". */
   white_label?:
     | boolean
     | { enabled?: boolean; brand_name?: string | null; support_email?: string | null; support_phone?: string | null }
@@ -263,7 +255,7 @@ export interface Branding {
   shadow?: string | null;
   /** 0–100. */
   overlay_intensity?: number | null;
-  /** Integer or string, as the dashboard stored it. */
+  /** An integer, or a numeric string. */
   font_weight_heading?: number | string | null;
   font_weight_body?: number | string | null;
   separator_color?: string | null;
@@ -279,7 +271,7 @@ export interface AltchaChallenge {
   maxnumber: number;
 }
 
-/** Sent as `data.altcha` / `altcha`. */
+/** The answer to the payment's security check. */
 export interface AltchaSolution {
   algorithm: string;
   challenge: string;
@@ -309,7 +301,7 @@ export type SavedMethod =
       phone_country: string | null;
     };
 
-/** GET /pay/session, parsed leniently. */
+/** The payment, its payment methods and the merchant's branding. */
 export interface SessionData {
   transaction: SessionTransaction;
   channels: SessionChannel[];
@@ -319,7 +311,7 @@ export interface SessionData {
   branding?: Record<string, string | null>;
   /** `branding`, read with its types (white label, weights, overlay…). */
   parsedBranding?: Branding;
-  /** Absent when broadcasting is off. */
+  /** Absent when the payment has no live status updates. */
   echo?: EchoConfig;
   altcha?: AltchaChallenge | null;
   /** The merchant callback with `status=succeeded` (informational). */
@@ -335,12 +327,12 @@ export interface SessionData {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Wire: GET /pay/status, confirmation steps, cancel
+// Status, confirmation steps, cancel
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** GET /pay/status `transaction`. */
+/** Where a payment is. */
 export interface PaymentStatus {
-  /** Wajub's payment id (= SessionTransaction.id), not the merchant reference. */
+  /** Wajub's payment id (= `SessionTransaction.id`), not the merchant's reference. */
   reference: string;
   status: string;
   /** Only when an attempt was refused and the payment is back at `pending`. */
@@ -351,7 +343,6 @@ export interface PaymentStatus {
 
 export type ConfirmStepKind = 'otp' | 'pin' | 'phone' | 'birthday' | 'address';
 
-/** POST /pay/{kind}/verify — HTTP 200 for both. */
 /**
  * The next step a provider asks for after a confirmation step: `action` and
  * its fields, as a payment's own answer carries them (`confirm_otp` with
@@ -400,32 +391,32 @@ export type WajubErrorType =
   | 'payment_error'
   | 'rate_limit_error';
 
-/** Wajub.js's error shape plus the mobile fields (spec errors.md §1). */
+/** The fields of a `WajubError`. */
 export interface WajubErrorShape {
   name?: 'WajubError';
   type: WajubErrorType;
-  /** The catalogue's code, or an API code passed through. */
+  /** What went wrong, to branch on. */
   code: string;
   /** Payer-facing, in the sheet's language. */
   message: string;
-  /** 402: the API's `error_code`. */
+  /** On a decline, its reason. */
   decline_code?: string | null;
   retryable: boolean;
   /** The field at fault, e.g. "data.phone". */
   param?: string | null;
   correlation_id?: string | null;
-  /** 429. */
+  /** The wait on `rate_limited`. */
   retry_after_seconds?: number | null;
-  /** The API's `errors`, first message per key. */
+  /** The field errors, first message per field. */
   details?: Record<string, string>;
   http_status?: number | null;
-  /** 403 `shield_blocked`. */
+  /** On `shield_blocked`, the reference to quote to Wajub support. */
   block_reference?: string | null;
-  /** The API's own (English) message, for logs. */
+  /** Wajub's own English text, for your logs. */
   api_message?: string | null;
 }
 
-/** The spec's plain error shape (errors.md §1): `WajubError.toJSON()`. */
+/** `WajubError.toJSON()`: the plain shape. */
 export interface WajubErrorJSON {
   name: 'WajubError';
   type: WajubErrorType;
@@ -444,7 +435,7 @@ export interface WajubErrorJSON {
 
 export type ActionKind = 'redirect' | 'confirm' | 'confirm_3ds' | 'push_approval' | 'client_session';
 
-/** One `/pay/process` answer, as `mapProcessResponse()` and the 1.4 `WajubSession` methods read it. */
+/** A payment attempt's answer, as `mapProcessResponse()` and the 1.4 `WajubSession` methods read it. */
 export type PaymentResult =
   | { status: 'complete'; transaction: SessionTransaction }
   | { status: 'processing'; transaction: SessionTransaction; instruction?: string | null }
@@ -458,7 +449,7 @@ export type PaymentResult =
     }
   | { status: 'failed'; error: WajubErrorShape; transaction: SessionTransaction | null };
 
-/** The `action` of a `/pay/process` answer (spec v2): any value the API may send. */
+/** What a payment attempt asks for next; other values may come. */
 export type ProcessAction =
   | 'redirect'
   | 'confirm'
@@ -472,9 +463,9 @@ export type ProcessAction =
   | (string & {});
 
 /**
- * One `/pay/process` (or client-session) answer, spec v2's way
- * (`WajubSession.submit()`): the confirmation steps carry their `stepId` and
- * `hint`; an action the SDK cannot perform is `failed` / `unsupported_action`.
+ * A payment attempt's answer, as `WajubSession.submit()` reads it: a
+ * confirmation step carries its `stepId` and `hint`; a step the SDK cannot
+ * perform is `failed` / `unsupported_action`.
  */
 export type ProcessOutcome =
   | { status: 'complete'; transaction: SessionTransaction }
@@ -482,11 +473,11 @@ export type ProcessOutcome =
   | {
       status: 'requires_action';
       action: ProcessAction;
-      /** `confirm_url`, or `client_session.hosted_url`. */
+      /** The provider's page to open. */
       url: string | null;
-      /** `otp_id` / `pin_id` / `phone_id` / `birthday_id` / `address_id` / `three_ds_id`. */
+      /** The confirmation step's id, for its verify call. */
       stepId: string | null;
-      /** `otp_masked_contact` / `*_instruction` / `masked_email`. */
+      /** What to show the payer with the step (where a code was sent, an instruction). */
       hint: string | null;
       clientSession: ClientSession | null;
       transaction: SessionTransaction | null;
@@ -506,10 +497,10 @@ export interface PaymentSheetResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Payment sheet: states, callbacks, results (spec states.md)
+// Payment sheet: states, callbacks, results
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Wajub.js's `CheckoutState`, exact names. */
+/** The sheet's states, as `onStateChange` reports them. */
 export type CheckoutState =
   | 'INITIATED'
   | 'COLLECTING_DETAILS'
@@ -529,7 +520,7 @@ export type CheckoutState =
   | 'EXPIRED'
   | 'CANCELLED';
 
-/** Wajub.js's `PaymentSuccess`. Confirm server-side before delivering. */
+/** A successful payment. Confirm it on your server before delivering. */
 export interface PaymentSuccess {
   /** `transaction.id`. */
   id: string;
@@ -548,7 +539,7 @@ export interface PaymentSuccess {
 
 export type CancelReason = 'payer_cancelled' | 'dismissed' | 'host_gone';
 
-/** How the sheet closed (states.md §4): what `onComplete` gets and `present()` resolves with. */
+/** How the sheet closed: what `onComplete` gets and `present()` resolves with. */
 export type CheckoutResult =
   | { status: 'complete'; payment: PaymentSuccess; transaction: SessionTransaction }
   /** An attempt started (so the payment is known) and has no outcome yet. */
@@ -597,7 +588,7 @@ export interface PaymentStartedEvent {
   channel: string;
 }
 
-/** Wajub.js's redirect event. */
+/** A provider's page about to open in the system browser. */
 export interface RedirectEvent {
   url: string;
   method: 'GET';
@@ -622,10 +613,10 @@ export interface CheckoutCallbacks {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Appearance (spec appearance.md) — the same object as Wajub.js
+// Appearance
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Wajub.js's variable names, exactly. */
+/** The appearance variables. */
 export interface AppearanceVariables {
   colorPrimary?: string;
   colorBackground?: string;
@@ -723,15 +714,15 @@ export interface PresentOptions extends CheckoutCallbacks {
     /** "detect": no operator list until the number does not tell. Default "choose". */
     operatorMode?: 'choose' | 'detect';
   };
-  /** A dismiss before any attempt cancels the payment (POST /pay/cancel). Default true. */
+  /** Closing the sheet before any attempt cancels the payment. `false` keeps it open, to present it again. Default true. */
   cancelOnDismiss?: boolean;
   /** ms before the success screen closes itself; 0 keeps it. Default 3000. */
   autoCloseSuccess?: number;
-  /** Where the per-install id behind the device fingerprint is kept. Default: AsyncStorage. */
+  /** Where the SDK keeps its data: any `{ getItem, setItem }`. Default: AsyncStorage. */
   storage?: WajubStorage;
   /**
-   * Stripe cards: the sheet initialises `@stripe/stripe-react-native` with the
-   * payment's publishable key; give your own here to have it put back after.
+   * Stripe cards need nothing more. If your app also takes its own Stripe
+   * payments, give its publishable key so they keep working after the sheet.
    */
   stripe?: { appPublishableKey?: string };
 }

@@ -9,17 +9,11 @@ const SUCCESS = ['success', 'successful', 'succeeded', 'paid', 'complete'];
 const ENDED = ['failed', 'cancelled', 'expired'];
 
 /**
- * Watches a payment for a host that draws its own UI, as 1.4 did: the
- * session is read right away and then on a schedule (`intervalMs`, slower
- * after two minutes without a change, 15 s while the realtime socket is up,
- * backing off on errors), next to the payment's private realtime channel.
- * `onUpdate` gets `mapStatusToResult()` of each status read, as 1.4 did:
- * every poll when the session has no realtime channel (`echo`), and only a
- * status that changed when it has one, the socket and the polls telling the
- * same news. A final status stops the watch. There is no time limit: it runs until a final status, or
- * until the returned function is called. An ended session (`401`, `403`,
- * `404`, `410`) stops it too, with a `failed` result carrying that error —
- * 1.4 kept polling it forever.
+ * Reports a payment's status to an app that draws its own screens, as 1.4
+ * did: `onUpdate` gets `mapStatusToResult()` of the status right away, then
+ * of its changes, at least every `intervalMs`. It runs until a final status,
+ * a session that has ended (a `failed` result with its error), or until the
+ * returned function is called.
  */
 export function subscribeStatus(
   client: PayClient,

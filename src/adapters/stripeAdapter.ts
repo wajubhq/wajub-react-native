@@ -3,7 +3,7 @@ export interface StripeCardRequest {
   card_holder?: string;
 }
 
-/** Builds `/pay/process` data for Stripe tokenized cards. */
+/** `data` for a card Stripe has turned into a PaymentMethod. */
 export function buildStripeCardRequest(
   paymentMethodId: string,
   cardholderName?: string | null,
@@ -16,10 +16,9 @@ export function buildStripeCardRequest(
 }
 
 /**
- * Tokenize with `@stripe/stripe-react-native`. Stripe must be initialised with
- * the payment's publishable key (sdk-config's): the sheet and
- * `StripeCardSection` given `publishableKey` do it themselves; code of your own
- * calls `initStripe()` with that key. Returns `pm_*` for [WajubSession.payCard].
+ * A PaymentMethod from `@stripe/stripe-react-native`, initialised with the
+ * payment method's `publishable_key` (`StripeCardSection` given
+ * `publishableKey` does it). Returns the `pm_…` id for `WajubSession.payCard()`.
  */
 export async function createStripePaymentMethod(
   createFn: () => Promise<{ paymentMethodId?: string | null; error?: { message?: string } | null }>,

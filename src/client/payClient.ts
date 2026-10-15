@@ -26,14 +26,14 @@ import {
 import type { RawProcessBody } from '../wire/parse';
 import { acceptLanguage, clientHeader, clientSignals } from './device';
 
-/** Whole-request timeouts (spec README §2.4). The connect timeout is the platform's. */
+/** @internal Whole-request timeouts. The connect timeout is the platform's. */
 export const TIMEOUTS = {
   requestMs: 30_000,
-  /** /pay/process, /pay/client-session(/complete), the verify calls: they reach a provider. */
+  /** The calls that reach a provider: a payment, its checkout, its confirmation steps. */
   paymentRequestMs: 60_000,
 } as const;
 
-/** Automatic retries (spec README §2.5). */
+/** @internal Automatic retries. */
 export const RETRY = {
   getMaxRetries: 3,
   postMaxRetries: 2,
@@ -67,25 +67,25 @@ const RETRIED_STATUSES: Record<RetryPolicy, number[]> = {
 };
 
 export interface RequestOptions {
-  /** One per payment attempt; the automatic retries of that request reuse it. */
+  /** One per payment attempt: the same key makes a repeated request the same attempt. */
   idempotencyKey?: string;
-  /** Aborting it stops the request and its retries. */
+  /** Aborting it stops the request. */
   signal?: AbortSignal;
-  /** Called as each try (the first, and every automatic retry) is sent. */
+  /** @internal Called as the request is sent. */
   onSend?: (at: number) => void;
 }
 
 export interface PayClientOptions {
   /** @internal For the SDK's own tests. Production always talks to https://api.wajub.com. */
   baseUrl?: string;
-  /** @internal Waits between retries; tests pass an instant one. */
+  /** @internal For the SDK's own tests. */
   sleep?: (ms: number) => Promise<void>;
   /**
-   * How API errors are reported. `legacy` (the default) keeps 1.4's codes and
-   * messages; `v2` maps them with the spec's catalogue (what the sheet uses).
+   * How errors are reported. `legacy` (the default) keeps 1.4's codes and
+   * messages; `v2` gives the codes and messages the payment sheet uses.
    */
   errors?: 'legacy' | 'v2';
-  /** Where the device fingerprint's install id is kept. Default: AsyncStorage. */
+  /** Where the SDK keeps its data: any `{ getItem, setItem }`. Default: AsyncStorage. */
   storage?: WajubStorage;
 }
 
@@ -140,12 +140,12 @@ function legacyHttpError(status: number, raw: unknown, headers: HeaderReader): W
   );
 }
 
-/** A new key for each payment attempt (`^[A-Za-z0-9._:-]{1,128}$`). */
+/** A new key for a payment attempt. */
 export function newIdempotencyKey(): string {
   return uuidV4();
 }
 
-/** `/pay/*` with the session token: headers, timeouts, retries, error mapping. */
+/** Wajub's payment session calls for one payment's `authorization_token`; `WajubSession` uses it. */
 export class PayClient {
   private readonly options: PayClientOptions;
   private readonly baseUrl: string;
@@ -157,7 +157,7 @@ export class PayClient {
     this.sleep = options.sleep ?? defaultSleep;
   }
 
-  /** The same client with some options changed (the sheet's: `errors: 'v2'`, the host's storage). */
+  /** The same client with some options changed. */
   with(options: PayClientOptions): PayClient {
     const merged: PayClientOptions = { ...this.options };
     for (const [key, value] of Object.entries(options)) {
@@ -170,6 +170,7 @@ export class PayClient {
     return this.options.errors === 'v2';
   }
 
+  /** The payment, its payment methods and the merchant's branding. */
   async getSession(token: string, options: RequestOptions = {}): Promise<SessionData> {
     const answer = await this.send(token, { method: 'GET', path: '/pay/session', timeoutMs: TIMEOUTS.requestMs, retry: 'read', phase: 'load' }, undefined, options);
     try {
@@ -181,20 +182,21 @@ export class PayClient {
     }
   }
 
+  /** How each payment method collects its details. */
   async getSdkConfig(token: string, options: RequestOptions = {}): Promise<SdkConfig> {
     const answer = await this.send(token, { method: 'GET', path: '/pay/sdk-config', timeoutMs: TIMEOUTS.requestMs, retry: 'read', phase: 'load' }, undefined, options);
     return parseSdkConfig(answer.body);
   }
 
-  /** GET /pay/status — `reference` there is the payment's id, not the merchant's reference. */
+  /** Where the payment is. Its `reference` is the payment's id, not the merchant's reference. */
   async getStatus(token: string, options: RequestOptions = {}): Promise<PaymentStatus> {
     const answer = await this.send(token, { method: 'GET', path: '/pay/status', timeoutMs: TIMEOUTS.requestMs, retry: 'read' }, undefined, options);
     return parseStatus(answer.body);
   }
 
   /**
-   * POST /pay/process. `data._client` (device signals) is added when absent.
-   * Without `idempotencyKey` each call is a new attempt with a key of its own.
+   * A payment attempt with one of the payment's methods. Without
+   * `idempotencyKey` each call is a new attempt.
    */
   async process(
     token: string,
@@ -212,10 +214,7 @@ export class PayClient {
     return parseProcess(answer.body);
   }
 
-  /**
-   * POST /pay/client-session — opens (or re-serves) a PSP-hosted checkout
-   * for `channel`. Idempotent server-side; pins the provider.
-   */
+  /** Opens the provider's own card checkout for `channel` (or gives back the one already open). */
   async startClientSession(
     token: string,
     channel: string,
@@ -238,10 +237,7 @@ export class PayClient {
     return parseProcess(answer.body);
   }
 
-  /**
-   * POST /pay/client-session/complete — the backend verifies with the PSP by
-   * its own reference; the client never sends a PSP reference.
-   */
+  /** The payer is back from the provider's checkout: Wajub checks the payment with the provider. */
   async completeClientSession(token: string, clientSessionId: string, request: RequestOptions = {}): Promise<RawProcessResponse> {
     const answer = await this.send(
       token,
@@ -252,12 +248,13 @@ export class PayClient {
     return parseProcess(answer.body);
   }
 
+  /** Cancels the payment for good; `redirect_url` is where the merchant sends a cancelled payer. */
   async cancel(token: string, options: RequestOptions = {}): Promise<CancelResult> {
     const answer = await this.send(token, { method: 'POST', path: '/pay/cancel', timeoutMs: TIMEOUTS.requestMs, retry: 'cancel' }, undefined, options);
     return parseCancel(answer.body);
   }
 
-  /** POST /pay/{kind}/verify — never retried: on no answer, read the status instead. */
+  /** Answers a confirmation step. Not repeated on its own: without an answer, read the status. */
   async verifyStep(token: string, kind: ConfirmStepKind, body: Record<string, string>, options: RequestOptions = {}): Promise<StepVerifyResponse> {
     const answer = await this.send(
       token,
@@ -268,12 +265,12 @@ export class PayClient {
     return parseStepVerify(answer.body);
   }
 
-  /** POST /pay/{kind}/resend — a no-op on the API's side today. */
+  /** Sends a confirmation step's code again. */
   async resendStep(token: string, kind: ConfirmStepKind, id: string, options: RequestOptions = {}): Promise<void> {
     await this.send(token, { method: 'POST', path: `/pay/${kind}/resend`, timeoutMs: TIMEOUTS.requestMs, retry: 'none' }, { [`${kind}_id`]: id }, options);
   }
 
-  /** POST /pay/3ds/verify (sandbox email code): HTTP 200 whose body says `code: 202`. */
+  /** Answers the sandbox 3-D Secure email code. */
   async verify3ds(token: string, threeDsId: string, code: string, options: RequestOptions = {}): Promise<void> {
     await this.send(
       token,
@@ -283,12 +280,12 @@ export class PayClient {
     );
   }
 
-  /** POST /pay/3ds/send — a new sandbox 3-D Secure code. */
+  /** Sends a new sandbox 3-D Secure code. */
   async send3ds(token: string, threeDsId: string, options: RequestOptions = {}): Promise<void> {
     await this.send(token, { method: 'POST', path: '/pay/3ds/send', timeoutMs: TIMEOUTS.requestMs, retry: 'none' }, { three_ds_id: threeDsId }, options);
   }
 
-  /** POST /pay/broadcasting/auth — signs the payment's private realtime channel. */
+  /** @internal Used by the SDK's live status updates. */
   async broadcastingAuth(token: string, socketId: string, channelName: string): Promise<{ auth: string }> {
     const answer = await this.send(
       token,
@@ -395,5 +392,5 @@ export class PayClient {
   }
 }
 
-/** 2xx body of /pay/process and the client-session calls, parsed leniently. */
+/** A payment attempt's answer, before it is read. */
 export type RawProcessResponse = RawProcessBody;
