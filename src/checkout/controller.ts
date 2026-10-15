@@ -776,8 +776,16 @@ export class CheckoutController {
     }
   }
 
-  /** The first 2xx of an attempt: from now on a dismiss resolves `processing`. */
-  private markStarted(): void {
+  /**
+   * A 2xx of an attempt: the API accepted it, so it stays undecided — nothing
+   * is cancelled — until a definitive answer (README §14). The payment is as
+   * its transaction says when that is final, else `processing` (a `pending`,
+   * an unknown status or none included). The first one fires
+   * `onPaymentStarted`; from then on a dismiss resolves `processing`.
+   */
+  private markStarted(status?: string | null): void {
+    const s = (status ?? '').toLowerCase();
+    this.knownStatus = SUCCESS_STATUSES.includes(s) || TERMINAL_AT_LOAD[s] ? s : 'processing';
     const attempt = this.attempt;
     if (!attempt || attempt.started) return;
     attempt.started = true;
@@ -786,7 +794,7 @@ export class CheckoutController {
 
   /** A 2xx: HTTP status, `action` and `transaction.status` decide — never `message`. */
   private handleAnswer(body: RawProcessBody): void {
-    this.markStarted();
+    this.markStarted(body.transaction?.status);
     if (!body.transaction) {
       // Accepted, but without the payment: an unknown outcome — watched, never a failure.
       this.update({ busy: false });
@@ -796,7 +804,6 @@ export class CheckoutController {
     }
     if (body.transaction) this.transaction = { ...this.transaction, ...body.transaction };
     const status = body.transaction?.status ?? '';
-    if (status) this.knownStatus = status.toLowerCase();
     const ctx = body.transaction?.processing_context ?? {};
     this.update({ busy: false });
 
@@ -1064,13 +1071,13 @@ export class CheckoutController {
       this.restartClientSession = false;
       const session = body.client_session;
       if (body.action !== 'client_session' || !session?.hosted_url) {
-        this.markStarted();
+        this.markStarted(body.transaction?.status);
         this.update({ busy: false });
         this.fail(WajubError.create('unsupported_action', { lang: this.lang, apiMessage: body.action ?? null }));
         return;
       }
       if (body.transaction) this.transaction = { ...this.transaction, ...body.transaction };
-      this.markStarted();
+      this.markStarted(body.transaction?.status);
       this.clientSessionId = session.id;
       this.update({ busy: false });
       await this.redirect(session.hosted_url, 'PENDING');
@@ -1100,6 +1107,7 @@ export class CheckoutController {
       const body = await this.client.completeClientSession(this.token, id);
       if (this.settled || attempt !== this.attempt) return;
       if (body.transaction) this.transaction = { ...this.transaction, ...body.transaction };
+      this.markStarted(body.transaction?.status);
       if (SUCCESS_STATUSES.includes(body.transaction?.status ?? '')) return this.succeed(this.transaction!, 'card');
       // 202: not paid yet — the PSP's webhook settles it; the watch goes on. A refusal a poll
       // read meanwhile (`pending`, perhaps an earlier try's error_code) is not this answer's.
@@ -1110,6 +1118,8 @@ export class CheckoutController {
     } catch (e) {
       if (this.settled || attempt !== this.attempt || !(e instanceof WajubError)) return;
       if (e.http_status === 402 || (e.http_status === 422 && e.code === 'client_session_expired')) {
+        // A definitive refusal, as a 402 on /pay/process: the payment is back to `pending`.
+        this.knownStatus = 'pending';
         this.deferredOutcome = null;
         this.stopWatching();
         this.inFlight = false;
@@ -1219,6 +1229,7 @@ export class CheckoutController {
       if (!this.onStep(step.id)) return;
       if (answer.status === 'success') {
         if (answer.transaction) this.transaction = { ...this.transaction, ...answer.transaction };
+        this.markStarted(answer.transaction?.status);
         const s = answer.transaction?.status ?? '';
         if (SUCCESS_STATUSES.includes(s)) return this.succeed(this.transaction!, this.attempt?.method ?? 'card');
         if (s === 'failed') return this.fail(WajubError.create('payment_failed', { lang: this.lang }));
@@ -1303,6 +1314,7 @@ export class CheckoutController {
       if (this.threeDsTimer) clearTimeout(this.threeDsTimer);
       this.threeDsTimer = null;
       // Accepted: VERIFYING while the watch brings the outcome.
+      this.markStarted();
       this.update({ screen: { name: 'three_ds', threeDs: { ...threeDs, accepted: true, error: null } } });
     } catch (e) {
       if (!this.onStep(threeDs.id)) return;
@@ -1320,6 +1332,8 @@ export class CheckoutController {
         return;
       }
       if (status === 422 && error) {
+        // Refused for good (`3ds_*`): a definitive refusal, the payment back to `pending`.
+        this.knownStatus = 'pending';
         this.stopWatching();
         this.inFlight = false;
         this.fail(error.localized(this.lang));
@@ -1593,8 +1607,9 @@ export class CheckoutController {
     if (screen.name === 'failed' || screen.name === 'expired' || screen.name === 'cancelled' || screen.name === 'load_error') {
       return { status: 'failed', error: screen.error, transaction: this.transaction };
     }
-    // Money may still move: the merchant confirms server-side.
-    if (this.inFlight || this.attempt?.started || this.stripePressed) return this.processingResult();
+    // Money may still move: the merchant confirms server-side. The attempt counts from the Pay
+    // press — while Stripe tokenizes or Altcha is solved too, though nothing was sent yet.
+    if (this.inFlight || this.attempt?.started || this.stripePressed || this.pressed) return this.processingResult();
     return reason === 'host_gone' ? this.cancelled('host_gone', null) : null;
   }
 

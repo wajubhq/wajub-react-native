@@ -370,6 +370,104 @@ describe('CN — what may be cancelled', () => {
   });
 });
 
+describe('CN — an accepted attempt stays undecided', () => {
+  const sent = (path: string) => api.fetch.mock.calls.filter(([url]) => new URL(String(url)).pathname === path).length;
+  const card = async (routes: Record<string, Answer | Answer[]>, openUrl?: () => Promise<boolean>) => {
+    const s = await sheet({ 'GET /pay/sdk-config': 'sdk-config-card-paystack', 'GET /pay/status': 'status-processing', ...routes });
+    if (openUrl) s.openUrl.mockImplementation(openUrl);
+    s.controller.chooseMethod('card');
+    await s.controller.payCard({ email: 'chidi.okafor@example.com' });
+    await settle();
+    return s;
+  };
+
+  it('CN-04 never cancels after a 2xx it could not act on', async () => {
+    // /pay/process: a 2xx is an attempt the API accepted, whatever its transaction says.
+    const unknownAction = body('process-requires-otp');
+    unknownAction.action = 'confirm_biometrics';
+    const withoutStatus = body('process-requires-otp');
+    withoutStatus.action = 'confirm_biometrics';
+    delete withoutStatus.transaction.status;
+    const saysPending = body('process-requires-otp');
+    saysPending.action = 'confirm_biometrics';
+    saysPending.transaction.status = 'pending';
+    const missingId = body('process-requires-otp');
+    delete missingId.otp_id;
+    for (const [name, answer] of [
+      ['unknown action', unknownAction],
+      ['transaction without status', withoutStatus],
+      ['transaction pending', saysPending],
+      ['confirm_otp without otp_id', missingId],
+    ] as Array<[string, unknown]>) {
+      const { controller } = await sheet({ 'POST /pay/process': { status: 202, body: answer }, 'GET /pay/status': 'status-processing' });
+      await payMtn(controller);
+      expect([name, controller.getSnapshot().screen]).toEqual([name, expect.objectContaining({ name: 'failed', error: expect.objectContaining({ code: 'unsupported_action' }) })]);
+      controller.dismiss();
+      await expect(controller.result).resolves.toMatchObject({ status: 'failed' });
+      await settle();
+      expect([name, sent('/pay/cancel')]).toEqual([name, 0]);
+      api.restore();
+    }
+
+    // /pay/client-session: an action it does not know, a session without its page, a page that cannot open.
+    const redirect = body('client-session-start-202');
+    redirect.action = 'redirect';
+    const noUrl = body('client-session-start-202');
+    delete noUrl.client_session.hosted_url;
+    for (const [name, answer, openUrl] of [
+      ['action redirect', { status: 202, body: redirect }, undefined],
+      ['no hosted_url', { status: 202, body: noUrl }, undefined],
+      ['browser unavailable', 'client-session-start-202', async () => false],
+    ] as Array<[string, Answer, (() => Promise<boolean>) | undefined]>) {
+      const { controller } = await card({ 'POST /pay/client-session': answer }, openUrl);
+      expect([name, controller.getSnapshot().screen.name]).toEqual([name, 'failed']);
+      expect(controller.getSnapshot().canCancel).toBe(false);
+      controller.dismiss();
+      await expect(controller.result).resolves.toMatchObject({ status: 'failed' });
+      await settle();
+      expect([name, sent('/pay/cancel')]).toEqual([name, 0]);
+      api.restore();
+    }
+  });
+
+  it('CN-04 offers the cancel again after a refusal from /pay/client-session/complete or 3-D Secure', async () => {
+    // The PSP declined (402 on /complete), with or without a poll that read `processing` first.
+    jest.useFakeTimers();
+    for (const pollFirst of [false, true]) {
+      const { controller } = await card({ 'POST /pay/client-session': 'client-session-start-202', 'POST /pay/client-session/complete': 'client-session-complete-402' });
+      if (pollFirst) await jest.advanceTimersByTimeAsync(5_000);
+      (AppState as unknown as { emit(s: string): void }).emit('background');
+      (AppState as unknown as { emit(s: string): void }).emit('active');
+      await settle(20);
+      expect(controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { retryable: true } });
+      controller.tryAgain();
+      expect(controller.getSnapshot().canCancel).toBe(true);
+      controller.dismiss();
+      await expect(controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
+      expect(sent('/pay/cancel')).toBe(1);
+      api.restore();
+    }
+    jest.useRealTimers();
+
+    // The sandbox 3-D Secure code refused for good (a 422 `3ds_*`).
+    const threeDs = await sheet({
+      'POST /pay/process': 'process-requires-3ds-sandbox',
+      'POST /pay/3ds/verify': { status: 422, body: { code: 422, status: 'Unprocessable Content', message: 'Expired.', error_code: '3ds_expired' } },
+      'GET /pay/status': 'status-processing',
+    });
+    await payMtn(threeDs.controller);
+    expect(threeDs.controller.getSnapshot()).toMatchObject({ state: '3DS_REQUIRED', canCancel: false });
+    await threeDs.controller.submit3ds('123456');
+    await settle();
+    expect(threeDs.controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { code: '3ds_expired' } });
+    threeDs.controller.tryAgain();
+    expect(threeDs.controller.getSnapshot().canCancel).toBe(true);
+    threeDs.controller.dismiss();
+    await expect(threeDs.controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
+    expect(sent('/pay/cancel')).toBe(1);
+  });
+});
+
 describe('ST — states, callbacks, results', () => {
   it('ST-01 reports Wajub.js states', async () => {
     const seen: string[] = [];

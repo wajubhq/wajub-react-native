@@ -59,8 +59,10 @@
   running, or cannot be read, is watched too, never a failure. A card or wallet-only payment waits
   for sdk-config instead of showing "no payment method", and a failed one shows Retry.
 - `POST /pay/cancel` goes only for a payment whose last known status is `pending`, with no attempt
-  undecided (from the Pay press to a definitive answer): Wajub cancels a payment being processed
-  too, one the payer may still approve. No "Cancel payment" during an approval, a confirmation step
+  undecided (from the Pay press to a definitive answer; an accepted answer the sheet cannot act on
+  keeps it undecided): Wajub cancels a payment being processed too, one the payer may still
+  approve. Closing once Pay was pressed, while Stripe reads the card or Altcha is solved, resolves
+  `processing`. No "Cancel payment" during an approval, a confirmation step
   or a provider's page, where closing the sheet resolves `processing`; after a definitive refusal
   it is offered again, and closing the failure screen resolves `failed` with the error shown while
   the cancel goes too (unless `cancelOnDismiss: false`), so the order is released. Closing while the

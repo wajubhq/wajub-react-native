@@ -260,7 +260,8 @@ describe('AL — Altcha', () => {
     twice.controller.hostGone();
     api.restore();
 
-    // Closed while the challenge is still being solved: cancelled, and nothing is charged.
+    // Closed while the challenge is still being solved: the attempt began at the Pay press, as
+    // while Stripe tokenizes — `processing`; nothing is sent, nothing cancelled.
     const hard = body('session-cm-aggregate');
     hard.altcha = { ...raw.altcha, challenge: sha256Hex(`${salt}9999`) };
     const closing = await sheet({ status: 200, body: hard }, 'process-processing-mobile-money-live');
@@ -271,7 +272,7 @@ describe('AL — Altcha', () => {
     closing.controller.dismiss();
     await paying;
     await settle();
-    await expect(closing.controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
+    await expect(closing.controller.result).resolves.toMatchObject({ status: 'processing' });
     expect(api.callsTo('POST /pay/process')).toHaveLength(0);
     // Pay was pressed: the attempt is undecided from then on, nothing is cancelled (README §14).
     expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
