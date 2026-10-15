@@ -297,6 +297,29 @@ describe('UI — payment sheet', () => {
     }
   });
 
+  it('MM-03 preselects again from the number typed when the payer changes country', async () => {
+    // Cameroon's aggregate and Côte d'Ivoire's operators, in one payment.
+    const session = body('session-cm-aggregate');
+    const ivorian = body('session-ci-xof-wallets').channels.filter((c: { slug: string }) => ['ci.mtn', 'ci.orange'].includes(c.slug));
+    session.channels = [...session.channels, ...ivorian];
+    await show({ locale: 'en', mobileMoney: { country: 'CM' } }, routes({ 'GET /pay/session': { status: 200, body: session } }));
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
+    });
+    // An Ivorian Orange number, typed while Cameroon is selected: nothing to detect there.
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-phone'), '0712345678');
+    });
+    expect(screen.getByTestId('wajub-operator-mtn').props.accessibilityState).toMatchObject({ selected: true });
+    // Côte d'Ivoire: the number names Orange there, before the payer presses Pay.
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-country-CI'));
+    });
+    expect(screen.getByTestId('wajub-operator-orange').props.accessibilityState).toMatchObject({ selected: true });
+    expect(screen.getByTestId('wajub-operator-mtn').props.accessibilityState).toMatchObject({ selected: false });
+  });
+
   it('draws the Mobile Money form, detection and the approval screen', async () => {
     const controller = await show(
       { locale: 'fr' },

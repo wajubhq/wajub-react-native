@@ -44,10 +44,17 @@ export function MobileMoneyForm({
   const [phone, setPhone] = useState('');
   const [listOpened, setListOpened] = useState(false);
 
-  // A new country: the first operator again, not marked as picked.
+  // A new country: the operator the number already typed names there, else the
+  // one selected when it is offered, else the first; not marked as picked.
   useEffect(() => {
-    setSelected((current) => (choices.some((c) => c.id === current) ? current : (choices[0]?.id ?? null)));
+    const sandboxSession = session.transaction.sandbox === true;
+    setSelected((current) => {
+      const kept = choices.some((c) => c.id === current) ? current : (choices[0]?.id ?? null);
+      return preselect(kept, false, phone, country, choices, sandboxSession);
+    });
     setPickedByHand(false);
+    // The number and country are read as they are when the choices change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [choices]);
 
   const rules = countryRules(country);
