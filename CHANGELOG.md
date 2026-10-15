@@ -27,6 +27,7 @@
   (15 s by default) shows the error with Retry instead of a bare message. A payment already paid
   opens on the success screen; a payment that ended (failed, cancelled, expired) on a notice with
   `onLoadError` and Wajub.js's codes; one still `processing` on its approval screen, watched.
+  These are drawn from the session alone: they neither wait for sdk-config nor fail when it does.
 - Mobile Money: a country selector, one line per operator of an aggregate (`cm.mobile` shows MTN
   and Orange) with their logos or brand badges, the number formatted as typed with its dial code,
   the operator detected from it until the payer picks one, and a number of another offered

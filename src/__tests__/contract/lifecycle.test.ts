@@ -297,16 +297,17 @@ describe('CN — cancel and dismiss', () => {
 
 describe('CN — what may be cancelled', () => {
   it('CN-04 never cancels a payment that may be under way', async () => {
-    // The session answered, sdk-config has not: its status decides a dismiss at once.
-    const cases: Array<[string, Record<string, unknown>, number]> = [
-      ['session-processing-mobile-money', { status: 'processing', transaction: { status: 'processing' } }, 0],
-      ['session-terminal-succeeded', { status: 'complete', payment: { method: 'unknown' } }, 0],
-      ['session-terminal-failed', { status: 'failed', error: { code: 'session_terminal_failed' } }, 0],
-      ['session-cm-aggregate', { status: 'cancelled', reason: 'dismissed', redirectUrl: body('cancel-200').redirect_url }, 1],
+    // The session answered, sdk-config has not: its status decides a dismiss at once. A payment
+    // paid, ended or under way has its screen already (LD-06); a pending one waits for sdk-config's grace.
+    const cases: Array<[string, Record<string, unknown>, number, string]> = [
+      ['session-processing-mobile-money', { status: 'processing', transaction: { status: 'processing' } }, 0, 'approval'],
+      ['session-terminal-succeeded', { status: 'complete', payment: { method: 'unknown' } }, 0, 'success'],
+      ['session-terminal-failed', { status: 'failed', error: { code: 'session_terminal_failed' } }, 0, 'failed'],
+      ['session-cm-aggregate', { status: 'cancelled', reason: 'dismissed', redirectUrl: body('cancel-200').redirect_url }, 1, 'loading'],
     ];
-    for (const [session, result, cancels] of cases) {
+    for (const [session, result, cancels, screen] of cases) {
       const { controller } = await sheet({ 'GET /pay/session': session, 'GET /pay/sdk-config': 'hang' });
-      expect(controller.getSnapshot().screen.name).toBe('loading');
+      expect([session, controller.getSnapshot().screen.name]).toEqual([session, screen]);
       controller.dismiss();
       await expect(controller.result).resolves.toMatchObject(result);
       expect([session, api.callsTo('POST /pay/cancel').length]).toEqual([session, cancels]);

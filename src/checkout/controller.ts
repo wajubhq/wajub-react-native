@@ -160,10 +160,14 @@ const RAW_CARD_KEYS = ['card.number', 'card_number', 'number', 'cvv', 'cvc', 'pi
 const PAYMENT_METHODS = ['mobile_money', 'card', 'wallet'];
 
 /** A payment still to pay whose only ways are card or wallets: it cannot be offered without sdk-config. */
-function needsSdkConfig(session: SessionData): boolean {
+/** A payment the sheet offers methods for: `pending`, or any status README §4.2 reads as such. */
+function payableAtLoad(session: SessionData): boolean {
   const status = session.transaction.status.toLowerCase();
-  const payable = !SUCCESS_STATUSES.includes(status) && !['failed', 'cancelled', 'expired', 'processing', 'partial'].includes(status);
-  return payable && !session.channels.some(isMobileMoneyChannel) && session.channels.some((c) => c.type === 'card' || c.type === 'wallet');
+  return !SUCCESS_STATUSES.includes(status) && !['failed', 'cancelled', 'expired', 'processing', 'partial'].includes(status);
+}
+
+function needsSdkConfig(session: SessionData): boolean {
+  return payableAtLoad(session) && !session.channels.some(isMobileMoneyChannel) && session.channels.some((c) => c.type === 'card' || c.type === 'wallet');
 }
 
 /** Device options the sheet passes; tests replace them. */
@@ -339,7 +343,11 @@ export class CheckoutController {
         this.knownStatus = session.transaction.status.toLowerCase();
         this.transaction = session.transaction;
         let config: SdkConfig | null | undefined;
-        if (needsSdkConfig(session)) {
+        if (!payableAtLoad(session)) {
+          // Paid, ended or under way: the session alone draws its screen (success, notice, restore
+          // and watch). sdk-config is neither waited for nor needed; it joins if the form comes back.
+          config = undefined;
+        } else if (needsSdkConfig(session)) {
           // Card or wallets only: they need sdk-config, which gets its own timeouts and retries.
           config = await configLoad;
           if (!current()) return;
@@ -469,9 +477,11 @@ export class CheckoutController {
   private applyLateConfig(session: SessionData, config: SdkConfig): void {
     // A load error shown while it was missing (no method, or the ready timer): the sheet starts over with it.
     if (!this.ready && this.snapshot.screen.name === 'load_error') return this.applySession(session, config);
-    if (this.snapshot.screen.name !== 'methods' && this.snapshot.screen.name !== 'form') return;
+    if (this.settled) return;
     const methods = availableMethods(session, config, this.lang, this.stripeInstalled);
     if (methods.length <= this.snapshot.methods.length) return;
+    // On another screen (a payment restored and watched): the methods are there if the form comes back.
+    if (this.snapshot.screen.name !== 'methods' && this.snapshot.screen.name !== 'form') return this.update({ methods });
     this.chosen = methods.find((m) => m.id === this.chosen?.id) ?? this.chosen;
     const screen = this.snapshot.screen.name === 'form' && this.chosen ? { name: 'form' as const, method: this.chosen } : this.snapshot.screen;
     this.update({ methods, screen });

@@ -181,6 +181,55 @@ describe('LD — loading', () => {
     }
   });
 
+  it('LD-06 restores a payment from the session alone, without sdk-config', async () => {
+    jest.useFakeTimers();
+    // Card only, under way at a provider: nothing of sdk-config is needed to draw it.
+    const cardOnly = body('session-processing-mobile-money');
+    cardOnly.channels = cardOnly.channels.filter((c: { type: string }) => c.type === 'card');
+    cardOnly.transaction.processing_context = {
+      ...cardOnly.transaction.processing_context,
+      channel_slug: 'card',
+      is_mobile_money: false,
+      payer_instruction: null,
+    };
+    for (const config of [{ status: 500, body: { code: 500 } }, 'network', 'hang'] as Answer[]) {
+      const { controller, onLoadError, onReady } = await load({ status: 200, body: cardOnly }, config);
+      // At once: no grace waited for, and no load error when sdk-config fails.
+      expect(controller.getSnapshot()).toMatchObject({ state: 'PENDING', screen: { name: 'pending' } });
+      expect(onReady).toHaveBeenCalledTimes(1);
+      expect(onLoadError).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(5000);
+      expect(api.callsTo('GET /pay/status').length).toBeGreaterThanOrEqual(1);
+      expect(controller.getSnapshot().screen.name).toBe('pending');
+      controller.dismiss();
+      await expect(controller.result).resolves.toMatchObject({ status: 'processing' });
+      expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+      api.restore();
+    }
+
+    // Paid or ended at load: its screen at once too, with sdk-config still on its way.
+    for (const [name, state] of [
+      ['session-terminal-succeeded', 'SUCCESS'],
+      ['session-terminal-failed', 'FAILED'],
+      ['session-terminal-cancelled', 'CANCELLED'],
+      ['session-terminal-expired', 'EXPIRED'],
+    ]) {
+      const { controller, onLoadError } = await load(name, 'hang');
+      expect([name, controller.getSnapshot().state]).toEqual([name, state]);
+      expect(onLoadError).toHaveBeenCalledTimes(state === 'SUCCESS' ? 0 : 1);
+      controller.hostGone();
+      api.restore();
+    }
+
+    // Refused later, back on the form: sdk-config that came meanwhile brings its methods.
+    const late = body('session-processing-mobile-money');
+    const { controller } = await load({ status: 200, body: late }, 'sdk-config-cm-stripe');
+    expect(controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    await settle();
+    expect(controller.getSnapshot().methods.map((m) => m.kind).sort()).toEqual(['card', 'mobile_money']);
+    controller.hostGone();
+  });
+
   it('LD-08 raises ready_timeout', async () => {
     jest.useFakeTimers();
     let release!: () => void;
