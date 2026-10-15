@@ -87,6 +87,29 @@ describe('MM — Mobile Money', () => {
     sandbox.controller.hostGone();
     api.restore();
 
+    // A sandbox session stays one when a later answer leaves the key out: after a refusal, a test
+    // number the plan refuses is still taken, and the payment's transaction still says sandbox.
+    api.restore();
+    jest.useFakeTimers();
+    const keyless = body('process-processing-mobile-money-sandbox');
+    delete keyless.transaction.sandbox;
+    const kept = await sheet('session-sandbox-cm', [{ status: 202, body: keyless }, 'process-processing-mobile-money-sandbox']);
+    const keptMtn = operatorChoices(kept.controller.getSnapshot().session!.channels, 'CM', 'en').find((c) => c.id === 'mtn')!;
+    await kept.controller.payMobileMoney({ phone: '670000000', country: 'CM', choice: keptMtn, pickedByHand: true });
+    await settle();
+    api.answer('GET /pay/status', 'status-pending-attempt-refused');
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(kept.controller.getSnapshot().screen.name).toBe('failed');
+    kept.controller.tryAgain();
+    api.answer('GET /pay/status', 'status-processing');
+    await kept.controller.payMobileMoney({ phone: '+2376700000000', country: 'CM', choice: keptMtn, pickedByHand: true });
+    await settle();
+    expect(api.callsTo('POST /pay/process').map((c) => c.body.data.phone)).toEqual(['+237670000000', '+2376700000000']);
+    kept.controller.dismiss();
+    await expect(kept.controller.result).resolves.toMatchObject({ status: 'processing', transaction: { sandbox: true } });
+    api.restore();
+    jest.useRealTimers();
+
     // …and is refused in a live one.
     const live = await sheet('session-cm-aggregate', 'process-processing-mobile-money-live', { locale: 'en' });
     const liveMtn = operatorChoices(live.controller.getSnapshot().session!.channels, 'CM', 'en')[0];

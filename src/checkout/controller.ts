@@ -227,6 +227,8 @@ export class CheckoutController {
   private knownStatus: string | null = null;
   /** A 400 whose status re-read said nothing: a later `pending` read decides as the re-read would have. */
   private notProcessable: Attempt | null = null;
+  /** The session said it is a sandbox one: test numbers and cards. */
+  private sandboxSession = false;
   private graceTimer: ReturnType<typeof setTimeout> | null = null;
   /** A payment request that got no answer: its key, reused by the next Pay if it never reached the API. */
   private unanswered: { key: string; sentAt: number; baseline: string | null | undefined } | null = null;
@@ -342,6 +344,8 @@ export class CheckoutController {
         // Its status decides what closing the sheet means from now on, before sdk-config is in.
         this.knownStatus = session.transaction.status.toLowerCase();
         this.transaction = session.transaction;
+        // A sandbox payment stays one: a later answer without the key never makes it live.
+        this.sandboxSession = session.transaction.sandbox === true;
         // The refusal left on the payment (null: none) is the watch's baseline: not this sheet's news.
         // An older answer does not say: unknown.
         if (session.transaction.error_code !== undefined) this.knownErrorCode = session.transaction.error_code;
@@ -502,6 +506,11 @@ export class CheckoutController {
     return this.knownStatus === 'pending' && !this.inFlight && !this.stripePressed && !this.pressed;
   }
 
+  /** A later answer's transaction over the one known; the session's sandbox flag is kept. */
+  private absorb(update: SessionTransaction): void {
+    this.transaction = { ...this.transaction, ...update, sandbox: this.sandboxSession };
+  }
+
   /** The payer left (closed, cancelling) while the SDK was waiting: nothing more is sent. */
   private abandoned(): boolean {
     return this.settled || this.snapshot.cancelling || !this.snapshot.visible;
@@ -644,10 +653,10 @@ export class CheckoutController {
     const method = this.snapshot.methods.find((m) => m.kind === 'mobile_money');
     // Nothing is taken while the payment is being cancelled, or once the sheet closed.
     if (!method || method.kind !== 'mobile_money' || this.abandoned()) return;
-    const sandbox = this.transaction?.sandbox === true;
+    const sandbox = this.sandboxSession;
     const problem = validateMobileMoney(input.phone, input.country, this.choicesFor(input.country, method), input.choice?.id ?? null, sandbox);
     // Sandbox test numbers do not follow real numbering plans: a mismatch never blocks there.
-    const blocking = problem && !(problem.code === 'operator_mismatch' && this.transaction?.sandbox);
+    const blocking = problem && !(problem.code === 'operator_mismatch' && this.sandboxSession);
     if (problem && blocking) {
       const message =
         problem.code === 'operator_mismatch'
@@ -746,7 +755,7 @@ export class CheckoutController {
     const payload: Record<string, unknown> = { ...data };
     if (this.options.returnUrl) payload.return_url = this.options.returnUrl;
     // The API refuses raw card data in live; the SDK never sends it there.
-    if (!this.transaction?.sandbox && RAW_CARD_KEYS.some((k) => k in payload)) {
+    if (!this.sandboxSession && RAW_CARD_KEYS.some((k) => k in payload)) {
       this.update({ banner: WajubError.create('raw_card_data_not_accepted', { lang: this.lang }) });
       return;
     }
@@ -812,7 +821,7 @@ export class CheckoutController {
       this.watch(false);
       return;
     }
-    if (body.transaction) this.transaction = { ...this.transaction, ...body.transaction };
+    if (body.transaction) this.absorb(body.transaction);
     const status = body.transaction?.status ?? '';
     const ctx = body.transaction?.processing_context ?? {};
     this.update({ busy: false });
@@ -967,7 +976,7 @@ export class CheckoutController {
       const choices = this.choicesFor(country, method);
       const named = /belongs to \w+ \(\w+\.(\w+)\)/i.exec(apiMessage)?.[1]?.toLowerCase();
       // The API's carrier lookup first; the prefix rules when its message names none.
-      const detectedId = named || (attempt?.phone ? detectOperator(attempt.phone, country, this.transaction?.sandbox === true) : null);
+      const detectedId = named || (attempt?.phone ? detectOperator(attempt.phone, country, this.sandboxSession) : null);
       const detected = choices.find((c) => c.id === detectedId);
       const selected = choices.find((c) => c.channel === attempt?.channel && (!c.viaAggregate || c.id === attempt?.data.operator));
       if (detected && selected) {
@@ -1088,7 +1097,7 @@ export class CheckoutController {
         this.fail(WajubError.create('unsupported_action', { lang: this.lang, apiMessage: body.action ?? null }));
         return;
       }
-      if (body.transaction) this.transaction = { ...this.transaction, ...body.transaction };
+      if (body.transaction) this.absorb(body.transaction);
       this.markStarted(body.transaction?.status);
       this.clientSessionId = session.id;
       this.update({ busy: false });
@@ -1118,7 +1127,7 @@ export class CheckoutController {
     try {
       const body = await this.client.completeClientSession(this.token, id);
       if (this.settled || attempt !== this.attempt) return;
-      if (body.transaction) this.transaction = { ...this.transaction, ...body.transaction };
+      if (body.transaction) this.absorb(body.transaction);
       this.markStarted(body.transaction?.status);
       if (SUCCESS_STATUSES.includes(body.transaction?.status ?? '')) return this.succeed(this.transaction!, 'card');
       // 202: not paid yet — the PSP's webhook settles it; the watch goes on. A refusal a poll
@@ -1245,7 +1254,7 @@ export class CheckoutController {
           const { status: _status, transaction, ...next } = answer;
           return this.handleAnswer({ code: 202, status: 'Accepted', message: '', ...next, ...(transaction ? { transaction } : {}) });
         }
-        if (answer.transaction) this.transaction = { ...this.transaction, ...answer.transaction };
+        if (answer.transaction) this.absorb(answer.transaction);
         this.markStarted(answer.transaction?.status);
         const s = answer.transaction?.status ?? '';
         if (SUCCESS_STATUSES.includes(s)) return this.succeed(this.transaction!, this.attempt?.method ?? 'card');
