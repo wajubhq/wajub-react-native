@@ -10,7 +10,6 @@
  * carry the values read here, and one it reads as absent or unusable is left out.
  */
 import type {
-  AltchaChallenge,
   Branding,
   ChannelOperator,
   ClientSession,
@@ -21,6 +20,7 @@ import type {
   SdkChannelConfig,
   SdkConfig,
   SdkFlavor,
+  SecurityChallenge,
   SessionChannel,
   SessionData,
   SessionTransaction,
@@ -235,7 +235,7 @@ function parseBranding(raw: unknown): Branding {
   return branding;
 }
 
-function parseAltcha(raw: unknown): AltchaChallenge | null {
+function parseAltcha(raw: unknown): SecurityChallenge | null {
   const a = obj(raw);
   const challenge = text(a?.challenge);
   if (!a || !challenge) return null;
@@ -280,7 +280,7 @@ export function parseSession(raw: unknown): SessionData {
       .map(parseChannel)
       .filter((c): c is SessionChannel => !!c),
     parsedBranding: parseBranding(body.branding),
-    altcha: parseAltcha(body.altcha),
+    securityChallenge: parseAltcha(body.altcha),
     return_url: nullable(text(body.return_url)),
     cancel_url: nullable(text(body.cancel_url)),
     geo_country: nullable(text(body.geo_country)?.toUpperCase()),
@@ -299,7 +299,7 @@ export function parseSession(raw: unknown): SessionData {
   if (Array.isArray(body.saved_methods)) {
     session.saved_methods = body.saved_methods.map(parseSavedMethod).filter((m): m is SavedMethod => !!m);
   }
-  return keep(body, session, ['locale', 'branding', 'echo', 'features', 'saved_methods']);
+  return keep(body, session, ['locale', 'branding', 'echo', 'features', 'saved_methods', 'altcha']);
 }
 
 /** GET /pay/sdk-config. */

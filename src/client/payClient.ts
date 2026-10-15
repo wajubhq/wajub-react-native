@@ -227,7 +227,7 @@ export class PayClient {
       if (value) body[key] = value;
     }
     if (options.restart) body.restart = true;
-    if (options.altcha) body.altcha = options.altcha;
+    if (options.securitySolution) body.altcha = options.securitySolution;
     const answer = await this.send(
       token,
       { method: 'POST', path: '/pay/client-session', timeoutMs: TIMEOUTS.paymentRequestMs, retry: 'payment' },

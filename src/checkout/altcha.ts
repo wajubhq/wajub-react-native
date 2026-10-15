@@ -1,5 +1,5 @@
 import { sha256Hex } from '../crypto';
-import type { AltchaChallenge, AltchaSolution } from '../types';
+import type { SecurityChallenge, SecuritySolution } from '../types';
 
 /** Hashes between two yields to the JS thread (a few ms on a low-end phone), so typing stays smooth. */
 const BATCH = 250;
@@ -9,7 +9,7 @@ const BATCH = 250;
  * challenge (spec README §15), in batches that yield to the event loop.
  * Null when there is none, the algorithm is not SHA-256, or `signal` aborts.
  */
-export async function solveAltcha(challenge: AltchaChallenge, signal?: { aborted: boolean }): Promise<AltchaSolution | null> {
+export async function solveAltcha(challenge: SecurityChallenge, signal?: { aborted: boolean }): Promise<SecuritySolution | null> {
   if (challenge.algorithm.toUpperCase() !== 'SHA-256') return null;
   const target = challenge.challenge.toLowerCase();
   for (let n = 0; n <= challenge.maxnumber; n++) {

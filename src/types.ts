@@ -82,7 +82,7 @@ export interface ClientSessionOptions {
   state?: string | null;
   zip_code?: string | null;
   /** The security check's answer, when the payment asks for one. */
-  altcha?: AltchaSolution | null;
+  securitySolution?: SecuritySolution | null;
 }
 
 /** Error code for a payment step this SDK cannot perform — see mapProcessResponse(). */
@@ -263,7 +263,8 @@ export interface Branding {
   [key: string]: unknown;
 }
 
-export interface AltchaChallenge {
+/** A security check the payment asks to be answered before a payment attempt. */
+export interface SecurityChallenge {
   algorithm: string;
   challenge: string;
   salt: string;
@@ -272,7 +273,7 @@ export interface AltchaChallenge {
 }
 
 /** The answer to the payment's security check. */
-export interface AltchaSolution {
+export interface SecuritySolution {
   algorithm: string;
   challenge: string;
   number: number;
@@ -313,7 +314,8 @@ export interface SessionData {
   parsedBranding?: Branding;
   /** Absent when the payment has no live status updates. */
   echo?: EchoConfig;
-  altcha?: AltchaChallenge | null;
+  /** The security check to answer before a payment attempt; `null` when there is none. */
+  securityChallenge?: SecurityChallenge | null;
   /** The merchant callback with `status=succeeded` (informational). */
   return_url?: string | null;
   cancel_url?: string | null;

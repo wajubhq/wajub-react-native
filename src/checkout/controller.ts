@@ -17,8 +17,6 @@ import { isMobileMoneyChannel, mobileMoneyRequestData, operatorChoices, operator
 import type { OperatorChoice } from '../mobileMoney/form';
 import { buildHostedCardRequest } from '../mappers/paymentMapper';
 import type {
-  AltchaChallenge,
-  AltchaSolution,
   CheckoutResult,
   CheckoutState,
   ClientSessionOptions,
@@ -28,6 +26,8 @@ import type {
   PaymentSuccess,
   PresentOptions,
   SdkConfig,
+  SecurityChallenge,
+  SecuritySolution,
   SessionData,
   SessionTransaction,
 } from '../types';
@@ -209,7 +209,7 @@ export class CheckoutController {
   /** Altcha is on for this payment: no request goes without a solution. */
   private altchaOn = false;
   /** The next solution, being fetched or solved; null until one is asked for. */
-  private altcha: Promise<AltchaSolution | WajubError | null> | null = null;
+  private altcha: Promise<SecuritySolution | WajubError | null> | null = null;
   /** `altcha` was started ahead of time, after the last solution went out. */
   private altchaAhead = false;
   /** The solves under way, stopped when the sheet settles. */
@@ -542,13 +542,13 @@ export class CheckoutController {
 
   /** The session's challenge, solved in the background as soon as it loads. */
   private startAltcha(session: SessionData): void {
-    if (!session.altcha || this.altcha) return;
+    if (!session.securityChallenge || this.altcha) return;
     this.altchaOn = true;
     this.altchaAhead = false;
-    this.altcha = this.solve(session.altcha);
+    this.altcha = this.solve(session.securityChallenge);
   }
 
-  private solve(challenge: AltchaChallenge): Promise<AltchaSolution | WajubError> {
+  private solve(challenge: SecurityChallenge): Promise<SecuritySolution | WajubError> {
     const signal = { aborted: this.settled };
     this.altchaSolves.add(signal);
     return solveAltcha(challenge, signal).then((solution) => {
@@ -558,15 +558,15 @@ export class CheckoutController {
   }
 
   /** A new challenge from GET /pay/session (with its retries), solved; null when Altcha was turned off. */
-  private fetchAltcha(): Promise<AltchaSolution | WajubError | null> {
+  private fetchAltcha(): Promise<SecuritySolution | WajubError | null> {
     return this.client.getSession(this.token).then(
       (session) => {
         if (this.settled) return null;
-        if (!session.altcha) {
+        if (!session.securityChallenge) {
           this.altchaOn = false;
           return null;
         }
-        return this.solve(session.altcha);
+        return this.solve(session.securityChallenge);
       },
       (error: unknown) => (error instanceof WajubError ? error.localized(this.lang) : WajubError.create('network_error', { lang: this.lang })),
     );
@@ -577,7 +577,7 @@ export class CheckoutController {
    * fetched ahead of time that failed is asked for again now; one that cannot
    * be had is an error the payer can retry — nothing is sent without it.
    */
-  private async nextAltcha(): Promise<AltchaSolution | WajubError | null> {
+  private async nextAltcha(): Promise<SecuritySolution | WajubError | null> {
     if (!this.altchaOn) return null;
     if (!this.altcha) {
       this.altcha = this.fetchAltcha();
@@ -598,7 +598,7 @@ export class CheckoutController {
    * The solution for the request a Pay press is about to send: from the press
    * on, the attempt is undecided (README §14) — nothing is cancelled meanwhile.
    */
-  private async solutionForPay(): Promise<AltchaSolution | WajubError | null> {
+  private async solutionForPay(): Promise<SecuritySolution | WajubError | null> {
     this.pressed = true;
     try {
       return await this.nextAltcha();
@@ -608,8 +608,10 @@ export class CheckoutController {
   }
 
   /** A solution goes with one request only: the next one is fetched and solved ahead. */
-  private useAltcha(data: Record<string, unknown>, solution: AltchaSolution): void {
-    data.altcha = solution;
+  private useAltcha(data: Record<string, unknown>, solution: SecuritySolution, endpoint: Attempt['endpoint'] = 'process'): void {
+    // A payment's `data` carries it on the wire; a client session's options name it.
+    if (endpoint === 'client_session') data.securitySolution = solution;
+    else data.altcha = solution;
     this.altcha = this.fetchAltcha();
     this.altchaAhead = true;
   }
@@ -986,7 +988,7 @@ export class CheckoutController {
     }
     // A new request after a definitive answer: a new key.
     const data = { ...attempt.data };
-    this.useAltcha(data, solution);
+    this.useAltcha(data, solution, attempt.endpoint);
     this.attempt = { ...attempt, key: newIdempotencyKey(), data };
     this.inFlight = true;
     await this.send(this.attempt);
@@ -1063,7 +1065,7 @@ export class CheckoutController {
       return_url: this.options.returnUrl ?? null,
     };
     if (this.restartClientSession) data.restart = true;
-    if (altcha) this.useAltcha(data, altcha);
+    if (altcha) this.useAltcha(data, altcha, 'client_session');
     this.attempt = { endpoint: 'client_session', channel, method: 'card', key: newIdempotencyKey(), startedAt: monotonicNow(), started: false, phone: null, data };
     this.inFlight = true;
     await this.send(this.attempt);

@@ -100,7 +100,9 @@ describe('PR — parsing', () => {
       const kept = new Set(paths(parse(f.body)));
       // A `locale: null` is left out: `locale` is a string when present, as 1.4 typed it.
       const nullLocale = (path: string) => path === 'locale' && (f.body as { locale?: unknown }).locale == null;
-      dropped.push(...paths(f.body).filter((path) => !kept.has(path) && !nullLocale(path)).map((path) => `${name}: ${path}`));
+      // The security check is read under a name of its own.
+      const renamed = (path: string) => path.startsWith('altcha') && [...kept].some((k) => k.startsWith('securityChallenge'));
+      dropped.push(...paths(f.body).filter((path) => !kept.has(path) && !nullLocale(path) && !renamed(path)).map((path) => `${name}: ${path}`));
     }
     expect(dropped).toEqual([]);
 
@@ -218,7 +220,7 @@ describe('PR — parsing', () => {
     expect(wallets.locale).toBeUndefined();
 
     const sandbox = parseSession(body('session-sandbox-cm'));
-    expect(sandbox.altcha).toBeNull();
+    expect(sandbox.securityChallenge).toBeNull();
     // 2.1 leaves `echo` out without a key; 2.0 sent it with `key: null`.
     expect(sandbox.echo).toBeUndefined();
     expect(parseSession(body('session-processing-mobile-money')).echo?.key).toBe('');
