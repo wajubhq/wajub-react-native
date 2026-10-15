@@ -10,9 +10,11 @@
   provider pages happen in the sheet, which watches the status itself.
 - `present()` settles even when the screen that opened it unmounts: `cancelled` (`host_gone`)
   before any attempt, `processing` once one started, `complete` after a success — it used to wait
-  forever. Polling stops and nothing is cancelled. A second `present()` while a sheet is open is
-  refused with `sheet_already_presented`; one called as the previous sheet settles (from
-  `onComplete`, or by the next screen) opens, and React's StrictMode re-runs keep the open sheet.
+  forever. Polling stops and nothing is cancelled. Called after that screen unmounted, it resolves
+  `cancelled` (`host_gone`) at once, without a request. A second `present()` while a sheet is open
+  is refused with `sheet_already_presented`; one called as the previous sheet settles (from
+  `onComplete`, by the next screen, or by a screen that replaces the first in the same render and
+  presents as it mounts) opens, and React's StrictMode re-runs keep the open sheet.
 - New callbacks, with Wajub.js's names and order: `onReady`, `onStateChange` (Wajub.js's 17 states),
   `onLoadError`, `onPaymentStarted`, `onRedirect`, `onSuccess`, `onError`, `onCancel`, `onComplete`.
   A callback that throws is logged and the sheet carries on.
@@ -50,18 +52,40 @@
   SDK warns in development).
 - A payment request that got no answer is watched; if the status still reads `pending` a minute
   after the last try, the request most likely never reached Wajub: the sheet goes back to the form
-  with a connection message, and the next Pay reuses the same `Idempotency-Key`. A 400 whose status
-  says the payment is running is watched too, never a failure. Closing the sheet while the payment
-  is still loading cancels nothing; a refused cancel whose status cannot be read resolves
-  `processing`. A card or wallet-only payment waits for sdk-config instead of showing "no payment
-  method", and a failed one shows Retry.
+  with a connection message, and the next Pay reuses the same `Idempotency-Key`. A 500, and a
+  502–504 after the retries, count as no answer; a refusal left on the payment by an earlier try
+  does not count as news, a newer one fails the attempt. A 400 whose status says the payment is
+  running, or cannot be read, is watched too, never a failure. A card or wallet-only payment waits
+  for sdk-config instead of showing "no payment method", and a failed one shows Retry.
+- `POST /pay/cancel` goes only for a payment whose last known status is `pending`, with no attempt
+  undecided (from the Pay press to a definitive answer): Wajub cancels a payment being processed
+  too, one the payer may still approve. No "Cancel payment" during an approval, a confirmation step
+  or a provider's page, where closing the sheet resolves `processing`; after a definitive refusal
+  it is offered again, and closing the failure screen resolves `failed` with the error shown while
+  the cancel goes too (unless `cancelOnDismiss: false`), so the order is released. Closing while the
+  payment loads cancels nothing; once the session is read its status decides at once, even before
+  sdk-config (a payment being processed resolves `processing`). A refused cancel whose status
+  cannot be read resolves `processing`. While a cancel runs, Pay, the close button and "Cancel
+  payment" are disabled and nothing is submitted.
+- With Altcha on, every request carries a solution of its own, fetched and solved ahead after the
+  previous one: a Pay waits for it, a challenge that cannot be had leaves the form with a retryable
+  message and is asked for again on the next Pay, and a refused or missing solution — even when the
+  session had no challenge — gets a fresh one. Nothing goes out without a solution.
+- A confirmation step whose check got no answer, or a 5xx, stays on its screen while the status is
+  read. Back from a provider's page, `/pay/client-session/complete` decides: a poll that reads an
+  earlier try's refusal meanwhile no longer fails the payment, and a success always wins.
+- An install id that cannot be read (a busy storage) gives a fingerprint for that run only; the
+  stored id is never written over.
 - Watching follows the spec's schedule: every 5 s, slower after two minutes without a change,
-  15 s while the realtime socket is up, backing off on errors, 15 minutes at most. It stops on an
-  ended session (`410`, `401`) instead of polling forever, and decides on `GET /pay/status`. The
-  realtime server is the payment's own (`echo`), or yours with `realtime: { host, port, tls }`;
-  `realtime: { enabled: false }` polls only. `watchStatus()` and `subscribeStatus()` keep 1.4's
-  results and their first read right away, with no time limit; they now slow down, back off on
-  errors and stop on an ended session with a `failed` result, where 1.4 polled it forever.
+  15 s while the realtime socket is up, backing off on errors, 15 minutes at most, counted on the
+  phone's monotonic clock from the attempt (never against `expires_at`: a phone whose clock runs
+  ahead no longer ends the watch early). It stops on an ended session (`410`, `401`) instead of
+  polling forever, and decides on `GET /pay/status`. The realtime server is the payment's own
+  (`echo`), or yours with `realtime: { host, port, tls }`; `realtime: { enabled: false }` polls
+  only. `watchStatus()` and `subscribeStatus()` keep 1.4's results, their first read right away
+  and their callbacks — every poll without a realtime channel, each change once with one — with no
+  time limit; they now slow down, back off on errors and stop on an ended session with a `failed`
+  result, where 1.4 polled it forever.
 - The sheet's errors follow the spec's catalogue: `WajubError` adds `http_status`,
   `block_reference` and `api_message`, maps every API answer the same way on every SDK, and has its
   message in the sheet's language (`localized('fr')`, `toJSON()`). The 1.4 `WajubSession` methods
@@ -70,14 +94,18 @@
   `mapProcessOutcome()`), which returns the confirmation steps with their `stepId` and `hint`,
   `verifyOtp()`, `verifyPin()`, `verifyPhone()`, `verifyBirthday()`, `verifyAddress()`, `resend()`,
   `verify3ds()` and `send3ds()`. `process()`, `mapProcessResponse()` and the other 1.4 methods keep
-  1.4's results. `SessionData.parsedBranding` reads `branding` with its types.
+  1.4's results, and their objects every key of the API's answer (`payment_limits`,
+  `checkout_fields`, `processing_context.bank_transfer_account`…), as 1.4 handed the JSON over.
+  `SessionData.parsedBranding` reads `branding` with its types.
 - Stripe cards use the payment's own publishable key from sdk-config: the sheet initialises Stripe
   with it, so a `StripeProvider` with another key no longer makes every card payment fail, and puts
   the app's key back after when given as `present({ stripe: { appPublishableKey } })`.
 - `returnUrl` is sent as `return_url` to the provider's page, `cancelOnDismiss: false` keeps the
   payment open when the sheet is closed before any attempt, and `autoCloseSuccess` sets how long
   the success screen stays. The `PaymentSheet` component is deprecated in favour of
-  `usePayment()`; it keeps its callbacks' 1.4 meanings.
+  `usePayment()`; it keeps its callbacks' 1.4 meanings — `onResult` with `processing` when the
+  sheet closes during an attempt, `onDismiss` before one — and, made visible while another sheet is
+  open, opens once that one closes.
 
 ## 1.4.1
 
