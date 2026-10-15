@@ -31,9 +31,11 @@
 - Mobile Money numbers are read by each country's current numbering plan, with numbers of an
   earlier plan (Benin's 8 digits, Gabon's) read in their current form and the leading 0 kept
   where it is part of the number (Côte d'Ivoire, Benin, Congo, Burkina Faso); the operator is
-  recognised from the number in more countries; a number typed with Arabic-Indic or Persian
-  digits is read as typed; and in a sandbox payment the test numbers are accepted as they are
-  typed.
+  recognised from the number in more countries; and in a sandbox payment the test numbers are
+  accepted as they are typed.
+- Digits typed on an Arabic-Indic or Persian keyboard are read as typed: in the Mobile Money
+  number, the confirmation codes, the PIN, the date of birth, the 3-D Secure code and the card
+  fields.
 - After **Pay**, "Approve the payment on your phone" with the operator's instruction; native
   screens for a one-time code, a PIN, a phone number, a date of birth and a billing address,
   including a second step a provider asks for after the first; the sandbox 3-D Secure email code;

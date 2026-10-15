@@ -8,6 +8,7 @@ import type { AppStateStatus, NativeEventSubscription } from 'react-native';
 
 import { openHostedRedirect } from '../adapters/hostedRedirect';
 import { monotonicNow } from '../clock';
+import { toAsciiDigits } from '../digits';
 import { newIdempotencyKey, PayClient } from '../client/payClient';
 import { deviceLocales } from '../client/device';
 import { langOf } from '../errorCatalogue';
@@ -138,6 +139,14 @@ interface Attempt {
 }
 
 const FINAL_SCREENS = ['success', 'failed', 'expired', 'cancelled'];
+
+/** The sandbox test card's fields that are digits: what each must be. */
+const CARD_DIGIT_FIELDS: Record<string, RegExp> = {
+  'card.number': /^[0-9]{12,19}$/,
+  expiry_month: /^[0-9]{1,2}$/,
+  expiry_year: /^[0-9]{2,4}$/,
+  cvv: /^[0-9]{3,4}$/,
+};
 
 /** A payment that had ended when the session was read: its load error (README §4.2). */
 const TERMINAL_AT_LOAD: Record<string, string> = {
@@ -677,9 +686,11 @@ export class CheckoutController {
   }
 
   /** Card through a hosted page, the sandbox test form, or a client session — by the method's flavour. */
-  async payCard(fields: Record<string, string>): Promise<void> {
+  async payCard(typed: Record<string, string>): Promise<void> {
     const method = this.chosenCard();
     if (!method || this.abandoned()) return;
+    // Digits typed on an Arabic-Indic or Persian keyboard are read as the ASCII ones they mean.
+    const fields = Object.fromEntries(Object.entries(typed).map(([key, value]) => [key, toAsciiDigits(value ?? '')]));
     const missing = this.checkFields(method.flavor === 'sandbox_form' ? [...SANDBOX_CARD_FIELDS] : method.fields, fields);
     if (missing) return;
     if (method.flavor === 'client_session') {
@@ -741,6 +752,9 @@ export class CheckoutController {
       else if (field === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
         errors[field] = WajubError.create('invalid_email', { lang: this.lang }).message;
       } else if (field === 'country' && !/^[A-Za-z]{2}$/.test(value)) {
+        errors[field] = WajubError.create('validation_error', { lang: this.lang }).message;
+      } else if (CARD_DIGIT_FIELDS[field] && !CARD_DIGIT_FIELDS[field].test(value.replace(/\s/g, ''))) {
+        // The test card's number, expiry and code: ASCII digits only.
         errors[field] = WajubError.create('validation_error', { lang: this.lang }).message;
       }
     }
@@ -1194,7 +1208,9 @@ export class CheckoutController {
 
   /** The step's body: its id under `{kind}_id`, then its fields. */
   private stepBody(step: StepScreen, values: Record<string, string>): Record<string, string> | null {
-    const v = (k: string) => (values[k] ?? '').trim();
+    // Digits typed on an Arabic-Indic or Persian keyboard are read as the ASCII ones they mean;
+    // a code, a PIN and a date are then ASCII digits or refused.
+    const v = (k: string) => toAsciiDigits(values[k] ?? '').trim();
     const errors: Record<string, string> = {};
     const required = WajubError.create('field_required', { lang: this.lang }).message;
     const body: Record<string, string> = { [`${step.kind}_id`]: step.id };
@@ -1327,7 +1343,7 @@ export class CheckoutController {
   async submit3ds(code: string): Promise<void> {
     const screen = this.snapshot.screen;
     if (screen.name !== 'three_ds' || this.snapshot.busy || this.abandoned()) return;
-    const value = code.trim();
+    const value = toAsciiDigits(code).trim();
     if (!/^[A-Za-z0-9]{4,8}$/.test(value)) {
       this.update({ fieldErrors: { code: WajubError.create(value ? 'invalid_code' : 'field_required', { lang: this.lang }).message } });
       return;

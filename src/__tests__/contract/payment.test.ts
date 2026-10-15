@@ -118,6 +118,31 @@ describe('CD — card', () => {
     const sandbox = await payCard('sdk-config-sandbox', 'process-requires-3ds-sandbox', { 'card.number': '4000 0566 5566 5556', card_holder: 'Awa Ngono', expiry_month: '12', expiry_year: '30', cvv: '123' }, 'session-sandbox-cm');
     expect(api.callsTo('POST /pay/process')[0].body.data).toMatchObject({ 'card.number': '4000056655665556', cvv: '123' });
     sandbox.controller.hostGone();
+    api.restore();
+
+    // Typed on an Arabic-Indic or Persian keyboard: the same card, in ASCII digits.
+    const arabic = await payCard(
+      'sdk-config-sandbox',
+      'process-requires-3ds-sandbox',
+      { 'card.number': '٤٠٠٠ ٠٥٦٦ ٥٥٦٦ ٥٥٥٦', card_holder: 'Awa Ngono', expiry_month: '۱۲', expiry_year: '۳۰', cvv: '١٢٣' },
+      'session-sandbox-cm',
+    );
+    expect(api.callsTo('POST /pay/process')[0].body.data).toMatchObject({ 'card.number': '4000056655665556', expiry_month: '12', expiry_year: '30', cvv: '123' });
+    arabic.controller.hostGone();
+    api.restore();
+
+    // The card's digits are digits: anything else is refused before anything is sent.
+    const letters = await payCard('sdk-config-sandbox', 'process-requires-3ds-sandbox', { 'card.number': '4000 0566 55xx 5556', card_holder: 'Awa Ngono', expiry_month: '12', expiry_year: '30', cvv: '12a' }, 'session-sandbox-cm');
+    expect(api.callsTo('POST /pay/process')).toHaveLength(0);
+    expect(letters.controller.getSnapshot().fieldErrors).toMatchObject({ 'card.number': expect.any(String), cvv: expect.any(String) });
+    letters.controller.hostGone();
+    api.restore();
+
+    // A provider's page: the billing fields it asks for, digits in ASCII.
+    const billing = { first_name: 'Awa', last_name: 'Ngono', email: 'awa.ngono@example.com', phone: '۰۷۱۲۳۴۵۶۷۸', address: 'Rue ١٢', city: 'Abidjan', country: 'CI', state: 'Abidjan', zip_code: '٠٠٢٢٥' };
+    const hosted = await payCard('sdk-config-card-cinetpay', 'process-redirect-card-hosted', billing);
+    expect(api.callsTo('POST /pay/process')[0].body.data).toMatchObject({ phone: '0712345678', address: 'Rue 12', zip_code: '00225' });
+    hosted.controller.hostGone();
   });
 });
 

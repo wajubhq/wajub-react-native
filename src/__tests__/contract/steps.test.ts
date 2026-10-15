@@ -203,6 +203,32 @@ describe('CF — confirmation steps', () => {
     failed.controller.hostGone();
   });
 
+  it('CF-01 reads codes typed with Arabic-Indic or Persian digits', async () => {
+    // The code, the PIN and the date of birth go out in ASCII digits.
+    const cases: Array<[ConfirmStepKind, Record<string, string>, Record<string, string>]> = [
+      ['otp', { code: '١٢٣٤٥٦' }, { code: '123456' }],
+      ['pin', { pin: '۱۲۳۴' }, { pin: '1234' }],
+      ['birthday', { birthday: '١٩٩٠-٠٤-٢١' }, { birthday: '1990-04-21' }],
+      ['phone', { phone: '٠٨٠١٢٣٤٥٦٧٨' }, { phone: '08012345678' }],
+    ];
+    for (const [kind, values, sent] of cases) {
+      const { controller } = await step(`process-requires-${kind}`, { [`POST /pay/${kind}/verify`]: `${kind}-verify-success` });
+      await controller.submitStep(values);
+      expect([kind, api.callsTo(`POST /pay/${kind}/verify`)[0]?.body]).toEqual([kind, expect.objectContaining(sent)]);
+      controller.hostGone();
+      api.restore();
+    }
+
+    // A code is digits: letters, or other characters, are refused before anything is sent.
+    const { controller } = await step('process-requires-otp', { 'POST /pay/otp/verify': 'otp-verify-success' }, { locale: 'en' });
+    for (const code of ['12ab56', '١٢٣٤٥x']) {
+      await controller.submitStep({ code });
+      expect(controller.getSnapshot()).toMatchObject({ state: 'OTP_REQUIRED', fieldErrors: { code: expect.any(String) } });
+    }
+    expect(api.callsTo('POST /pay/otp/verify')).toHaveLength(0);
+    controller.hostGone();
+  });
+
   it('CF-04 shows step validation errors', async () => {
     const address = await step('process-requires-address', { 'POST /pay/address/verify': 'address-verify-422-missing-fields' }, { locale: 'en' });
     await address.controller.submitStep({ address: '12 Admiralty Way', city: 'Lagos', state: 'Lagos', zip_code: '101233' });
@@ -267,7 +293,8 @@ describe('CF — confirmation steps', () => {
 
     const accepted = await threeDs('3ds-verify-202');
     expect(accepted.getSnapshot()).toMatchObject({ state: '3DS_REQUIRED', screen: { name: 'three_ds', threeDs: { maskedEmail: 'aw*******@example.com' } } });
-    await accepted.submit3ds('123456');
+    // Typed on an Arabic-Indic keyboard: the same code, in ASCII digits.
+    await accepted.submit3ds('١٢٣٤٥٦');
     expect(api.callsTo('POST /pay/3ds/verify')[0].body).toEqual({ three_ds_id: '5f0c2b1e-8d4a-4c3b-9e7f-1a2b3c4d5e6f', code: '123456' });
     expect(accepted.getSnapshot()).toMatchObject({ state: 'VERIFYING', screen: { threeDs: { accepted: true } } });
     api.answer('GET /pay/status', 'status-succeeded');
