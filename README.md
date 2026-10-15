@@ -70,6 +70,7 @@ export default function App() {
 Create a payment on your backend, then present the sheet from a screen. Render `PaymentSheet` (an element, `null` while no sheet is open) in the same component:
 
 ```tsx
+import { Button } from 'react-native';
 import { usePayment } from '@wajub/react-native';
 
 function CheckoutScreen({ authorizationToken }: { authorizationToken: string }) {
@@ -106,7 +107,7 @@ function CheckoutScreen({ authorizationToken }: { authorizationToken: string }) 
 }
 ```
 
-`present()` always settles, exactly once — also when the screen that opened it unmounts (`cancelled` with `host_gone` before any attempt, `processing` once one started, `complete` after a success). Called after that screen unmounted (your code awaited something first), it resolves `cancelled` with `host_gone` at once, without any request. Calling it while a sheet is open rejects at once with a `WajubError` whose code is `sheet_already_presented`; a screen replaced in one render by another that presents as it mounts settles its own sheet first, so the new one opens.
+`present()` always settles, exactly once — also when the screen that opened it unmounts (`cancelled` with `host_gone` before any attempt, `processing` once one started, `complete` after a success). Called after that screen unmounted (your code awaited something first), it resolves `cancelled` with `host_gone` at once, without any request. Calling it while a sheet is open rejects at once with a `WajubError` whose code is `sheet_already_presented`; a screen replaced in one render by another that presents as it mounts settles its own sheet first, so the new one opens. The payer closes the sheet with ✕, Android's back button, or "Close" on a final screen; it has no swipe-down.
 
 ## What the sheet does
 
@@ -204,7 +205,7 @@ present({
 
 - **Colour scheme**: `colorScheme` (or `theme`) first, then the app's scheme with `inherit: true`, then the merchant's dashboard setting, else `auto`, which follows the phone — live, while the sheet is open.
 - **Variables** (Wajub.js names): `colorPrimary`, `colorBackground`, `colorText`, `colorTextSecondary`, `colorTextPlaceholder`, `colorDanger`, `colorSuccess`, `fontFamily`, `fontSizeBase`, `fontWeightNormal`, `fontWeightMedium`, `fontWeightBold`, `spacingUnit`, `borderRadius` (capped at 22), `spacingGridRow`, `spacingGridColumn`.
-- **Top-level keys**: `primaryColor`, `secondaryColor`, `backgroundColor`, `fontFamily`, `borderRadius`, `buttonTextColor`, `inputBackgroundColor`, `inputBorderColor`, `textMutedColor`, `successColor`, `errorColor`, `shadow` (`none` · `low` · `high`), `labels`, `disableAnimations`.
+- **Top-level keys**: `primaryColor`, `secondaryColor`, `backgroundColor`, `fontFamily`, `borderRadius`, `buttonTextColor`, `inputBackgroundColor`, `inputBorderColor`, `textMutedColor`, `successColor`, `errorColor`, `shadow` (`none` · `low` · `high`), `labels` (`above`, the default, or `floating`: the label rests inside the empty field and rises onto its border with focus or a value, as on the web), `disableAnimations`.
 - **Precedence**, per token: `variables` > top-level keys > the preset > the merchant's branding (colours, radius, weights, logo, name; "Secured by Wajub" hidden for white-label merchants) > the web checkout's default palettes (`DEFAULT_PALETTES`, light and dark). A merchant primary colour that does not reach 3:1 against the background falls back to the default.
 - Colours: `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb()`, `rgba()`. Lengths: `"8px"`, `"8"`, `"0.5rem"`. Values that do not parse, unknown keys and `rules` are ignored, never an error.
 - `fontFamily` must be a font your app ships; system stacks (`-apple-system`, `Roboto`, `sans-serif`…) mean the platform's font. The merchant's dashboard font is not used: the SDK cannot know whether your app ships it.

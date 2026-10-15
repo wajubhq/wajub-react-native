@@ -132,40 +132,85 @@ export function Field({
   const { theme } = useSheet();
   const { colors } = theme;
   const [focused, setFocused] = useState(false);
+  // appearance `labels: 'floating'` (Wajub.js's): the label rests inside the box like a
+  // placeholder and rises onto its border when the field has focus or a value.
+  const floating = theme.labels === 'floating';
+  const raised = !floating || focused || value.length > 0 || !!prefix;
+  const lift = useRef(new Animated.Value(raised ? 1 : 0)).current;
+  useEffect(() => {
+    if (!floating) return;
+    if (theme.disableAnimations) lift.setValue(raised ? 1 : 0);
+    else Animated.timing(lift, { toValue: raised ? 1 : 0, duration: 150, useNativeDriver: false }).start();
+  }, [floating, raised, theme.disableAnimations, lift]);
+  const labelSize = theme.fontSizeBase;
+  const raisedSize = theme.fontSizeBase * 0.85;
   return (
     <View style={{ gap: theme.spacingUnit * 1.5 }}>
-      <Txt variant="label">{label}</Txt>
-      <View
-        style={[
-          styles.input,
-          {
-            minHeight: 44,
-            borderRadius: theme.radius,
-            backgroundColor: colors.inputBackground,
-            borderColor: error ? colors.dangerBorder : focused ? colors.focusRing : colors.inputBorder,
-            borderWidth: focused ? 2 : 1,
-            paddingHorizontal: theme.spacingUnit * 3 - (focused ? 1 : 0),
-          },
-        ]}
-      >
-        {prefix ? <Text style={[textStyle(theme, 'body'), { fontSize: theme.fontSizeBase, marginRight: theme.spacingUnit * 2 }]}>{prefix}</Text> : null}
-        <TextInput
-          testID={testID}
-          accessibilityLabel={label}
-          value={value}
-          onChangeText={onChangeText}
-          placeholder={placeholder}
-          placeholderTextColor={colors.textPlaceholder}
-          keyboardType={keyboardType}
-          secureTextEntry={secureTextEntry}
-          autoCapitalize={autoCapitalize}
-          autoCorrect={false}
-          maxLength={maxLength}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          style={{ flex: 1, paddingVertical: 10, color: colors.text, fontSize: theme.fontSizeBase, fontFamily: theme.fontFamily }}
-        />
-        {suffix}
+      {floating ? null : (
+        <Txt variant="label" testID={testID ? `${testID}-label` : undefined}>
+          {label}
+        </Txt>
+      )}
+      <View style={floating ? { paddingTop: Math.ceil(raisedSize / 2) } : null}>
+        <View
+          style={[
+            styles.input,
+            {
+              minHeight: 44,
+              borderRadius: theme.radius,
+              backgroundColor: colors.inputBackground,
+              borderColor: error ? colors.dangerBorder : focused ? colors.focusRing : colors.inputBorder,
+              borderWidth: focused ? 2 : 1,
+              paddingHorizontal: theme.spacingUnit * 3 - (focused ? 1 : 0),
+            },
+          ]}
+        >
+          {prefix ? <Text style={[textStyle(theme, 'body'), { fontSize: theme.fontSizeBase, marginRight: theme.spacingUnit * 2 }]}>{prefix}</Text> : null}
+          <TextInput
+            testID={testID}
+            accessibilityLabel={label}
+            value={value}
+            onChangeText={onChangeText}
+            // A resting floating label stands where the placeholder would.
+            placeholder={raised ? placeholder : undefined}
+            placeholderTextColor={colors.textPlaceholder}
+            keyboardType={keyboardType}
+            secureTextEntry={secureTextEntry}
+            autoCapitalize={autoCapitalize}
+            autoCorrect={false}
+            maxLength={maxLength}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            style={{ flex: 1, paddingVertical: 10, color: colors.text, fontSize: theme.fontSizeBase, fontFamily: theme.fontFamily }}
+          />
+          {suffix}
+        </View>
+        {floating ? (
+          <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+            <Animated.Text
+              testID={testID ? `${testID}-label` : undefined}
+              accessibilityElementsHidden
+              importantForAccessibility="no"
+              numberOfLines={1}
+              style={{
+                position: 'absolute',
+                left: theme.spacingUnit * 3 - 4,
+                maxWidth: '90%',
+                paddingHorizontal: 4,
+                // On the box's border, which it hides: the field's own background behind it.
+                backgroundColor: colors.inputBackground,
+                fontFamily: theme.fontFamily,
+                fontWeight: weight(theme.fontWeightNormal),
+                color: raised ? colors.textSecondary : colors.textPlaceholder,
+                top: lift.interpolate({ inputRange: [0, 1], outputRange: [Math.ceil(raisedSize / 2) + (44 - labelSize * 1.25) / 2, 0] }),
+                fontSize: lift.interpolate({ inputRange: [0, 1], outputRange: [labelSize, raisedSize] }),
+                lineHeight: lift.interpolate({ inputRange: [0, 1], outputRange: [labelSize * 1.25, raisedSize * 1.25] }),
+              }}
+            >
+              {label}
+            </Animated.Text>
+          </View>
+        ) : null}
       </View>
       {error ? (
         <Txt variant="hint" style={{ color: colors.danger }} testID={testID ? `${testID}-error` : undefined}>

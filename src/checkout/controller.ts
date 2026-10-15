@@ -1608,7 +1608,7 @@ export class CheckoutController {
     return { status: 'processing', transaction, instruction };
   }
 
-  /** Swipe down, back, the close button, or "Close" on a final screen. Bound: usable as a handler. */
+  /** Android's back button, the close button (✕), or "Close" on a final screen. Bound: usable as a handler. */
   dismiss = (): void => {
     if (this.settled || this.snapshot.cancelling) return;
     const result = this.closingResult('dismissed');

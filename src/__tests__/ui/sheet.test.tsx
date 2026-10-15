@@ -184,6 +184,52 @@ describe('UI — payment sheet', () => {
     await act(async () => controller.hostGone());
   });
 
+  it("AP-01 draws Wajub.js's floating labels", async () => {
+    // The floating label is hidden from accessibility (the field carries its name): include it.
+    const label = () => screen.getByTestId('wajub-field-email-label', { includeHiddenElements: true });
+    const flat = (_: string) => StyleSheet.flatten(label().props.style);
+    // The default: the label above the field.
+    await show({ locale: 'en' }, routes({ 'GET /pay/sdk-config': 'sdk-config-card-kkiapay' }));
+    await waitFor(() => screen.getByTestId('wajub-method-card'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-method-card'));
+    });
+    expect(flat('wajub-field-email-label').position).toBeUndefined();
+    screen.unmount();
+    api.restore();
+
+    // `labels: 'floating'`: inside the box while empty, on its border with focus or a value.
+    await show({ locale: 'en', appearance: { labels: 'floating', disableAnimations: true } }, routes({ 'GET /pay/sdk-config': 'sdk-config-card-kkiapay' }));
+    await waitFor(() => screen.getByTestId('wajub-method-card'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-method-card'));
+    });
+    // Prefilled with the customer's email: raised. Emptied: back inside the box.
+    expect(flat('wajub-field-email-label').top).toBe(0);
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-field-email'), '');
+    });
+    const resting = flat('wajub-field-email-label');
+    expect(resting.position).toBe('absolute');
+    expect(resting.top).toBeGreaterThan(0);
+    expect(label().props.children).toBe('Email');
+    await act(async () => {
+      fireEvent(screen.getByTestId('wajub-field-email'), 'focus');
+    });
+    const focused = flat('wajub-field-email-label');
+    expect(focused.top).toBe(0);
+    expect(focused.fontSize).toBeLessThan(resting.fontSize as number);
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-field-email'), 'awa@example.com');
+      fireEvent(screen.getByTestId('wajub-field-email'), 'blur');
+    });
+    expect(flat('wajub-field-email-label').top).toBe(0);
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-field-email'), '');
+    });
+    expect(flat('wajub-field-email-label').top).toBe(resting.top);
+  });
+
   it('AP-08 inherits the host theme', async () => {
     // The merchant designed for light; the app is dark.
     useColorScheme.mockReturnValue('dark');

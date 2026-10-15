@@ -19,7 +19,7 @@
   `onLoadError`, `onPaymentStarted`, `onRedirect`, `onSuccess`, `onError`, `onCancel`, `onComplete`.
   A callback that throws is logged and the sheet carries on.
 - The sheet has Wajub.js's appearance object (`theme`, presets `stripe`, `night`, `flat`, `none`,
-  `variables`, top-level keys), light and dark following the phone live, the merchant's branding
+  `variables`, top-level keys, `labels: 'floating'`), light and dark following the phone live, the merchant's branding
   under it (colours, radius, weights, logo, name, white label) and the web checkout's palettes
   under that. No colour is hard-coded any more; `StripeCardSection` follows the sheet's theme.
 - Loading shows a skeleton (or `loader: 'spinner'`), honours "reduce motion" and

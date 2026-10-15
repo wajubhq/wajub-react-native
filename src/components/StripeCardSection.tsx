@@ -59,8 +59,11 @@ export interface StripeCardSectionProps {
 }
 
 /**
- * Native Stripe card fields — requires `StripeProvider` at app root. Drawn
- * with the payment sheet's theme inside it, the default light one elsewhere.
+ * Native Stripe card fields. Given `publishableKey` (the payment's, from
+ * sdk-config — what the sheet passes), it initialises Stripe with it while it
+ * shows, so no `StripeProvider` is needed; without one, the app must have
+ * initialised Stripe with that key itself. Drawn with the payment sheet's
+ * theme inside it, the default light one elsewhere.
  */
 export function StripeCardSection({
   cardholderName,

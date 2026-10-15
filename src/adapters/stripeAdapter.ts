@@ -16,8 +16,10 @@ export function buildStripeCardRequest(
 }
 
 /**
- * Tokenize with `@stripe/stripe-react-native` (merchant must mount `StripeProvider`).
- * Returns `pm_*` for [WajubSession.payCard].
+ * Tokenize with `@stripe/stripe-react-native`. Stripe must be initialised with
+ * the payment's publishable key (sdk-config's): the sheet and
+ * `StripeCardSection` given `publishableKey` do it themselves; code of your own
+ * calls `initStripe()` with that key. Returns `pm_*` for [WajubSession.payCard].
  */
 export async function createStripePaymentMethod(
   createFn: () => Promise<{ paymentMethodId?: string | null; error?: { message?: string } | null }>,
