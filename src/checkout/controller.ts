@@ -801,7 +801,11 @@ export class CheckoutController {
   private handleAnswer(body: RawProcessBody): void {
     this.markStarted(body.transaction?.status);
     if (!body.transaction) {
-      // Accepted, but without the payment: an unknown outcome — watched, never a failure.
+      // Accepted, but without the payment: an unknown outcome — watched, never a failure, and read
+      // as a request without an answer: a newer refusal ends it, a `pending` a minute on sends the
+      // payer back to the form, the next Pay under the same key.
+      const attempt = this.attempt;
+      if (attempt) this.unanswered = { key: attempt.key, sentAt: attempt.sentAt ?? monotonicNow(), baseline: attempt.baseline };
       this.update({ busy: false });
       this.show({ name: 'pending', url: null, capped: false }, 'PENDING');
       this.watch(false);

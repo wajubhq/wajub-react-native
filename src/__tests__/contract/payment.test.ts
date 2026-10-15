@@ -406,6 +406,36 @@ describe('PA — process answers', () => {
     s.controller.dismiss();
     await expect(s.controller.result).resolves.toMatchObject({ status: 'processing' });
     expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+    api.restore();
+
+    // Read as a request without an answer (TR-09): a newer refusal ends the attempt at once…
+    jest.useFakeTimers();
+    const accepted = { status: 202, body: { code: 202, status: 'Accepted', message: 'Accepted.' } };
+    const pendingWith = (error_code: string | null) => ({ status: 200, body: { transaction: { reference: 'trx_PVrU8x2kQ1mNa7Lb3cDe', status: 'pending', error_code, payer_message: null } } });
+    const refused = await payMtn(accepted, { locale: 'en' }, 'session-cm-aggregate', { 'GET /pay/status': pendingWith('insufficient_funds') });
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(refused.controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { retryable: true } });
+    refused.controller.hostGone();
+    api.restore();
+
+    // …the refusal left on the payment at load is not this attempt's, and a `pending` a minute on sends
+    // the payer back to the form; the next Pay goes under the same key.
+    for (const [session, code] of [['session-cm-aggregate', null], ['session-pending-after-refusal', 'insufficient_funds']] as const) {
+      const waiting = await payMtn(accepted, { locale: 'en' }, session, { 'GET /pay/status': pendingWith(code), 'GET /pay/sdk-config': 'sdk-config-sandbox' });
+      expect(waiting.controller.getSnapshot().state).toBe('PENDING');
+      await jest.advanceTimersByTimeAsync(55_000);
+      expect(waiting.controller.getSnapshot().state).toBe('PENDING');
+      await jest.advanceTimersByTimeAsync(5_000);
+      expect(waiting.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', banner: { code: 'network_error', retryable: true } });
+      const key = api.callsTo('POST /pay/process')[0].headers['Idempotency-Key'];
+      const choice = operatorChoices(waiting.controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+      await waiting.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice, pickedByHand: true });
+      await settle();
+      const calls = api.callsTo('POST /pay/process');
+      expect(calls[calls.length - 1].headers['Idempotency-Key']).toBe(key);
+      waiting.controller.hostGone();
+      api.restore();
+    }
   });
 
   it('PA-02 fires nothing after the sheet closed', async () => {
