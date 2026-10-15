@@ -87,8 +87,8 @@ export class WajubSession {
    * Pays with one of the payment's `channels` (its slug): `complete`,
    * `processing`, `requires_action` (a provider's page, or a confirmation
    * step with its `stepId` and `hint`) or `failed`. Mobile Money `data`:
-   * `{ phone (E.164), country, operator? }`. `idempotencyKey`: the same key
-   * makes a repeated call the same attempt; a new one is made when absent.
+   * `{ phone (E.164), country, operator? }`. `idempotencyKey`: pass the
+   * same key to retry the same payment; a new one is made when absent.
    */
   async submit(channel: string, data: Record<string, unknown>, options: { idempotencyKey?: string } = {}): Promise<ProcessOutcome> {
     const raw = await this.v2.process(this.token, channel, data, options);
@@ -132,8 +132,8 @@ export class WajubSession {
   }
 
   /**
-   * A payment attempt, read the 1.4 way. `idempotencyKey`: the same key
-   * makes a repeated call the same attempt; a new one is made when absent.
+   * A payment attempt, read the 1.4 way. `idempotencyKey`: pass the same
+   * key to retry the same payment; a new one is made when absent.
    */
   async process(channel: string, data: Record<string, unknown>, options: { idempotencyKey?: string } = {}): Promise<PaymentResult> {
     const raw = await this.client.process(this.token, channel, data, options);

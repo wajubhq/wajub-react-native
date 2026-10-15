@@ -67,7 +67,7 @@ const RETRIED_STATUSES: Record<RetryPolicy, number[]> = {
 };
 
 export interface RequestOptions {
-  /** One per payment attempt: the same key makes a repeated request the same attempt. */
+  /** Pass the same key to retry the same payment; a new one is made when absent. */
   idempotencyKey?: string;
   /** Aborting it stops the request. */
   signal?: AbortSignal;
@@ -254,7 +254,7 @@ export class PayClient {
     return parseCancel(answer.body);
   }
 
-  /** Answers a confirmation step. Not repeated on its own: without an answer, read the status. */
+  /** Answers a confirmation step. Without an answer, read the payment's status before trying again. */
   async verifyStep(token: string, kind: ConfirmStepKind, body: Record<string, string>, options: RequestOptions = {}): Promise<StepVerifyResponse> {
     const answer = await this.send(
       token,

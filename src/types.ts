@@ -173,8 +173,8 @@ export interface SessionTransaction {
   terminal_at?: string | null;
   processing_context?: ProcessingContext | null;
   /**
-   * The refusal that put the payment back at `pending` (its code), `null`
-   * when there is none. Absent from older answers.
+   * The refusal that put the payment back at `pending` (its code); `null`
+   * when there is none, absent when not known.
    */
   error_code?: string | null;
 }
@@ -197,7 +197,7 @@ export interface SessionChannel {
   slug: string;
   /** In the session's locale. */
   name: string;
-  /** Always French (the wire key is literally `name.fr`). */
+  /** The name in French. */
   'name.fr'?: string;
   /** @deprecated Read `'name.fr'`; kept equal to it. */
   name_fr?: string;
@@ -259,7 +259,7 @@ export interface Branding {
   font_weight_heading?: number | string | null;
   font_weight_body?: number | string | null;
   separator_color?: string | null;
-  /** Every other key the API sends (`layout`, `card.background_color`, `tab_*`…), ignored on mobile. */
+  /** Other branding keys, which the sheet does not use. */
   [key: string]: unknown;
 }
 
@@ -556,8 +556,8 @@ export type CheckoutResult =
     };
 
 /**
- * @deprecated Never produced since 1.5: approvals, steps and provider pages
- * happen in the sheet. Kept in `present()`'s type so 1.4 code still compiles.
+ * @deprecated Never produced: approvals, steps and provider pages happen in
+ * the sheet. Kept in `present()`'s type so existing code still compiles.
  */
 export type DeprecatedRequiresAction = Extract<PaymentResult, { status: 'requires_action' }>;
 
