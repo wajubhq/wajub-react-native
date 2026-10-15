@@ -31,7 +31,8 @@
 - Mobile Money numbers are read by each country's current numbering plan, with numbers of an
   earlier plan (Benin's 8 digits, Gabon's) read in their current form and the leading 0 kept
   where it is part of the number (Côte d'Ivoire, Benin, Congo, Burkina Faso); the operator is
-  recognised from the number in more countries; and in a sandbox payment the test numbers are
+  recognised from the number in more countries; a number written with 00 is read like one written
+  with +, and another country's number is refused; and in a sandbox payment the test numbers are
   accepted as they are typed.
 - Digits typed on another script's keyboard (Arabic-Indic, Persian, Devanagari…) are read as
   typed: in the Mobile Money number, the confirmation codes, the PIN, the date of birth, the
