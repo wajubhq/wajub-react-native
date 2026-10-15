@@ -28,6 +28,8 @@
   number formatted as typed, the operator preselected from the number until the payer picks one,
   and a number of another offered operator refused in the payer's language before anything is
   sent. `mobileMoney.country`, `countryLocked` and `operatorMode: 'detect'` set the form up.
+- Côte d'Ivoire and Benin numbers have ten digits and keep their leading 0, with Benin's MTN and
+  Moov numbers recognised; an 8-digit Beninese number is read as its ten-digit form.
 - After **Pay**, "Approve the payment on your phone" with the operator's instruction; native
   screens for a one-time code, a PIN, a phone number, a date of birth and a billing address,
   including a second step a provider asks for after the first; the sandbox 3-D Secure email code;
@@ -52,6 +54,7 @@
 - New options: `returnUrl`, the link a provider's page sends the payer back to, and
   `autoCloseSuccess`, how long the success screen stays.
 - `@react-native-async-storage/async-storage` is a new peer dependency: install it.
+- The package ships compiled JavaScript with its type declarations.
 - Operator and channel logos use images React Native can draw, with the operator's brand badge
   otherwise.
 - The `PaymentSheet` component is deprecated in favour of `usePayment()`. It keeps its callbacks'
