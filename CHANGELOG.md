@@ -6,139 +6,81 @@
   closes, with `complete` (and a `PaymentSuccess`), `processing` (with the payment), `failed` or
   `cancelled` (with a `reason` and the `redirectUrl`). Code written for 1.4 compiles and runs
   unchanged: the result still fits `PaymentResult | { cancelled: true }`, and its type still lists
-  `requires_action`, which no longer comes — the Mobile Money approval, confirmation steps and
-  provider pages happen in the sheet, which watches the status itself.
+  `requires_action`, which no longer comes: the Mobile Money approval, the confirmation steps and
+  the provider's pages happen in the sheet, which follows the payment until it ends.
 - `present()` settles even when the screen that opened it unmounts: `cancelled` (`host_gone`)
-  before any attempt, `processing` once one started, `complete` after a success — it used to wait
-  forever. Polling stops and nothing is cancelled. Called after that screen unmounted, it resolves
-  `cancelled` (`host_gone`) at once, without a request. A second `present()` while a sheet is open
-  is refused with `sheet_already_presented`; one called as the previous sheet settles (from
-  `onComplete`, by the next screen, or by a screen that replaces the first in the same render and
-  presents as it mounts) opens, and React's StrictMode re-runs keep the open sheet.
-- New callbacks, with Wajub.js's names and order: `onReady`, `onStateChange` (Wajub.js's 17 states),
-  `onLoadError`, `onPaymentStarted`, `onRedirect`, `onSuccess`, `onError`, `onCancel`, `onComplete`.
-  A callback that throws is logged and the sheet carries on.
-- The sheet has Wajub.js's appearance object (`theme`, presets `stripe`, `night`, `flat`, `none`,
-  `variables`, top-level keys, `labels: 'floating'`), light and dark following the phone live, the merchant's branding
-  under it (colours, radius, weights, logo, name, white label) and the web checkout's palettes
-  under that. No colour is hard-coded any more; `StripeCardSection` follows the sheet's theme.
-- Loading shows a skeleton (or `loader: 'spinner'`), honours "reduce motion" and
-  `disableAnimations`, and reports `onReady`. A load that fails or takes longer than `readyTimeout`
-  (15 s by default) shows the error with Retry instead of a bare message. A payment already paid
-  opens on the success screen; a payment that ended (failed, cancelled, expired) on a notice with
-  `onLoadError` and Wajub.js's codes; one still `processing` on its approval screen, watched.
-  These are drawn from the session alone: they neither wait for sdk-config nor fail when it does.
-- Mobile Money: a country selector, one line per operator of an aggregate (`cm.mobile` shows MTN
-  and Orange) with their logos or brand badges, the number formatted as typed with its dial code,
-  the operator detected from it until the payer picks one, and a number of another offered
-  operator refused in the payer's language before it is sent (never for Wave and other wallets
-  that take any number; never in sandbox, whose test numbers do not follow real numbering plans).
-  The number goes out in E.164 — Côte d'Ivoire keeps its leading 0 — with `operator` on an
-  aggregate when the payer named one. `mobileMoney.country`, `countryLocked` and
-  `operatorMode: 'detect'` set the form up. The tables come from the spec's shared data file.
-- After Pay, a Mobile Money push shows "Approve the payment on your phone" with the operator's
-  instruction; `confirm_otp`, `confirm_pin`, `confirm_phone`, `confirm_birthday` and
-  `confirm_address` open their own screens (remaining attempts, Resend after 60 s) instead of
-  failing as `unsupported_action`; the sandbox 3-D Secure email code has its screen and countdown;
-  a provider's page opens in the system browser with Continue payment; the outcome screens offer
-  Try again when the error allows it (after the countdown of a rate limit).
-- Every request carries `X-Wajub-Client`, `X-Request-Id` and the device's `Accept-Language`, has a
-  timeout (30 s, 60 s for the calls that reach a provider) and is retried when that is safe: reads
-  up to three times with backoff, a payment up to twice with the same body and `Idempotency-Key`,
-  never a confirmation step. A payment that got no answer is watched, never shown as failed. Every
-  payment attempt sends `data._client` (time zone, language, screen, a fingerprint kept per
-  install). `@react-native-async-storage/async-storage` is now a peer dependency, so the
-  fingerprint survives restarts; `present({ storage })` or `createSession(token, client,
-  { storage })` keep it in your own storage instead. A missing module never breaks a payment (the
-  SDK warns in development).
-- A payment request that got no answer is watched; if the status still reads `pending` a minute
-  after the last try, the request most likely never reached Wajub: the sheet goes back to the form
-  with a connection message, and the next Pay reuses the same `Idempotency-Key`. A 500, and a
-  502–504 after the retries, count as no answer; a refusal left on the payment by an earlier try
-  does not count as news, a newer one fails the attempt. A 400 whose status says the payment is
-  running, or cannot be read, is watched too, never a failure. A card or wallet-only payment waits
-  for sdk-config instead of showing "no payment method", and a failed one shows Retry.
-- `POST /pay/cancel` goes only for a payment whose last known status is `pending`, with no attempt
-  undecided (from the Pay press to a definitive answer; an accepted answer the sheet cannot act on
-  keeps it undecided): Wajub cancels a payment being processed too, one the payer may still
-  approve. Closing once Pay was pressed, while Stripe reads the card or Altcha is solved, resolves
-  `processing`. No "Cancel payment" during an approval, a confirmation step
-  or a provider's page, where closing the sheet resolves `processing`; after a definitive refusal
-  it is offered again, and closing the failure screen resolves `failed` with the error shown while
-  the cancel goes too (unless `cancelOnDismiss: false`), so the order is released. Closing while the
-  payment loads cancels nothing; once the session is read its status decides at once, even before
-  sdk-config (a payment being processed resolves `processing`). A refused cancel whose status
-  cannot be read resolves `processing`. While a cancel runs, Pay, the close button and "Cancel
-  payment" are disabled and nothing is submitted.
-- With Altcha on, every request carries a solution of its own, fetched and solved ahead after the
-  previous one: a Pay waits for it, a challenge that cannot be had leaves the form with a retryable
-  message and is asked for again on the next Pay, and a refused or missing solution — even when the
-  session had no challenge — gets a fresh one. Nothing goes out without a solution.
-- A confirmation step whose check got no answer, or a 5xx, stays on its screen while the status is
-  read. Back from a provider's page, `/pay/client-session/complete` decides: a poll that reads an
-  earlier try's refusal meanwhile no longer fails the payment, and a success always wins.
-- An install id that cannot be read (a busy storage) gives a fingerprint for that run only; the
-  stored id is never written over.
-- Watching follows the spec's schedule: every 5 s, slower after two minutes without a change,
-  15 s while the realtime socket is up, backing off on errors, 15 minutes at most, counted on the
-  phone's monotonic clock from the attempt (never against `expires_at`: a phone whose clock runs
-  ahead no longer ends the watch early). It stops on an ended session (`410`, `401`) instead of
-  polling forever, and decides on `GET /pay/status`. The realtime server is the payment's own
-  (`echo`), or yours with `realtime: { host, port, tls }`; `realtime: { enabled: false }` polls
-  only. `watchStatus()` and `subscribeStatus()` keep 1.4's results, their first read right away
-  and their callbacks — every poll without a realtime channel, each change once with one — with no
-  time limit; they now slow down, back off on errors and stop on an ended session with a `failed`
-  result, where 1.4 polled it forever.
-- The sheet's errors follow the spec's catalogue: `WajubError` adds `http_status`,
-  `block_reference` and `api_message`, maps every API answer the same way on every SDK, and has its
-  message in the sheet's language (`localized('fr')`, `toJSON()`). The 1.4 `WajubSession` methods
-  keep 1.4's codes and messages. `WajubError.fromHttp()` is deprecated.
-- `WajubSession` adds spec v2's calls: `session()`, `sdkConfig()`, `status()`, `submit()` (and
-  `mapProcessOutcome()`), which returns the confirmation steps with their `stepId` and `hint`,
-  `verifyOtp()`, `verifyPin()`, `verifyPhone()`, `verifyBirthday()`, `verifyAddress()`, `resend()`,
-  `verify3ds()` and `send3ds()`. `process()`, `mapProcessResponse()` and the other 1.4 methods keep
-  1.4's results, and their objects every key of the API's answer (`payment_limits`,
-  `checkout_fields`, `processing_context.bank_transfer_account`…), as 1.4 handed the JSON over.
-  `SessionData.parsedBranding` reads `branding` with its types.
-- Stripe cards use the payment's own publishable key from sdk-config: the sheet initialises Stripe
-  with it, so a `StripeProvider` with another key no longer makes every card payment fail, and puts
-  the app's key back after when given as `present({ stripe: { appPublishableKey } })`.
-- `returnUrl` is sent as `return_url` to the provider's page, `cancelOnDismiss: false` keeps the
-  payment open when the sheet is closed before any attempt, and `autoCloseSuccess` sets how long
-  the success screen stays. The `PaymentSheet` component is deprecated in favour of
-  `usePayment()`; it keeps its callbacks' 1.4 meanings — `onResult` with `processing` when the
-  sheet closes during an attempt, `onDismiss` before one — and, made visible while another sheet is
-  open, opens once that one closes.
+  before any attempt, `processing` once one started, `complete` after a success. It used to wait
+  forever. Called after that screen unmounted, it resolves `cancelled` (`host_gone`) at once. A
+  second `present()` while a sheet is open is refused with `sheet_already_presented`; one called as
+  the previous sheet closes opens, and React's StrictMode keeps the open sheet.
+- New callbacks: `onReady`, `onStateChange` (17 states), `onLoadError`, `onPaymentStarted`,
+  `onRedirect`, `onSuccess`, `onError`, `onCancel`, `onComplete`. A callback that throws is logged
+  and the sheet carries on.
+- The `appearance` option: presets `stripe`, `night`, `flat` and `none`, `variables`, top-level
+  keys and `labels: 'floating'`, light and dark following the phone live, and the merchant's
+  branding (colours, radius, weights, logo, name, white label) for what you leave unset.
+  `StripeCardSection` follows the sheet's look.
+- Loading shows a skeleton (or `loader: 'spinner'`) and honours "reduce motion" and
+  `disableAnimations`. A load that fails or takes longer than `readyTimeout` (15 s by default)
+  shows the error with **Retry**. A payment already paid opens on the success screen, one that
+  ended on a notice with `onLoadError`, and one still in progress on its waiting screen.
+- Mobile Money: a country selector, one line per operator with its logo (or a brand badge), the
+  number formatted as typed, the operator preselected from the number until the payer picks one,
+  and a number of another offered operator refused in the payer's language before anything is
+  sent. `mobileMoney.country`, `countryLocked` and `operatorMode: 'detect'` set the form up.
+- After **Pay**, "Approve the payment on your phone" with the operator's instruction; native
+  screens for a one-time code, a PIN, a phone number, a date of birth and a billing address,
+  including a second step a provider asks for after the first; the sandbox 3-D Secure email code;
+  provider pages in the system browser with **Continue payment**; **Try again** on the failure
+  screen when the error allows it.
+- Closing the sheet: before any attempt it cancels the payment (unless `cancelOnDismiss: false`);
+  during a payment it resolves `processing` and the payment keeps running; on the failure screen
+  it resolves `failed` and cancels the payment when it still can be. **Cancel payment** is offered
+  only while no payment is under way, and Pay, ✕ and **Cancel payment** are disabled while it
+  runs.
+- A payment whose answer was lost on the network is never shown as failed: the sheet waits for its
+  outcome, and offers the form again when the payment never started.
+- `WajubError` adds `http_status`, `block_reference` and `api_message`, `toJSON()` and
+  `localized('fr')`; the sheet's errors have their message in the sheet's language. The 1.4
+  `WajubSession` methods keep 1.4's codes and messages. `WajubError.fromHttp()` is deprecated.
+- `WajubSession` adds `session()`, `status()`, `submit()` (with `mapProcessOutcome()`), the
+  confirmation step calls (`verifyOtp()`, `verifyPin()`, `verifyPhone()`, `verifyBirthday()`,
+  `verifyAddress()`, `resend()`, `verify3ds()`, `send3ds()`) and `SessionData.parsedBranding`.
+  The 1.4 methods keep 1.4's results, and their objects keep every key of Wajub's answer.
+- Stripe cards need no `StripeProvider`. If your app also takes its own Stripe payments, pass its
+  key as `present({ stripe: { appPublishableKey } })` so they keep working after the sheet.
+- New options: `returnUrl`, the link a provider's page sends the payer back to, and
+  `autoCloseSuccess`, how long the success screen stays.
+- `@react-native-async-storage/async-storage` is a new peer dependency: install it.
+- Operator and channel logos use images React Native can draw, with the operator's brand badge
+  otherwise.
+- The `PaymentSheet` component is deprecated in favour of `usePayment()`. It keeps its callbacks'
+  1.4 meanings — `onResult` with `processing` when the sheet closes during an attempt, `onDismiss`
+  before one — and, made visible while another sheet is open, opens once that one closes.
+- `watchStatus()` and `subscribeStatus()` keep 1.4's results and stop on a session that has ended,
+  with a `failed` result, where 1.4 kept reading it.
 
 ## 1.4.1
 
-- `watchStatus()` reports the payment's status again when realtime is on. The SDK subscribed to a
-  channel named after your own reference, while Wajub publishes on the payment's id: the socket
-  connected, the polling stopped, and no update ever arrived. It now subscribes on the payment's
-  id (`transaction.id`).
-- Polling no longer stops when the socket connects. It runs for the whole watch, so a status the
-  socket did not carry (one that changed before the subscription, or a missed event) still
-  reaches your callback within `intervalMs`. With realtime on, the callback is called when the
-  result changes, not on every poll, and a final result stops the polling.
-- An ended session (`410`) is an `authentication_error` with `retryable: false`, and a server
-  error (`5xx`) an `api_error`. Both used to come back as a retryable `payment_error`. `param`
-  names the refused field when a refusal is about exactly one. A token that is not a session
-  (`401`, `404`) is not retryable either: no retry of the same token can succeed.
-- Closing the payment sheet before submitting anything also cancels the payment on Wajub
-  (`POST /pay/cancel`), as the hosted checkout and the Flutter SDK do; `present()` still resolves
-  `{ cancelled: true }`. When an attempt was under way the payment is left alone, since a Mobile
-  Money approval can still land. `WajubSession.cancelIfNothingSubmitted()` does the same for a
-  sheet of your own.
-- The 3D Secure or provider page opens on Android 11 and later without a `<queries>` block in your
-  manifest. The SDK asked `canOpenURL()` first, which Android answers `false` for https without
-  that declaration, and gave up. An https URL is now opened directly.
+- `watchStatus()` reports the payment's status changes again: for most payments, no update reached
+  your callback.
+- A status change no longer goes missing: it reaches your callback within `intervalMs`, and a final
+  status ends the watch.
+- An ended session is an `authentication_error` with `retryable: false`, and a server error an
+  `api_error`. Both used to come back as a retryable `payment_error`. `param` names the refused
+  field when a refusal is about exactly one. A token that is not a payment session is not
+  retryable either.
+- Closing the payment sheet before submitting anything also cancels the payment, as the hosted
+  checkout does; `present()` still resolves `{ cancelled: true }`. When an attempt was under way
+  the payment is left alone, since a Mobile Money approval can still land.
+  `WajubSession.cancelIfNothingSubmitted()` does the same for a sheet of your own.
+- The 3-D Secure or provider page opens on Android 11 and later without a `<queries>` block in
+  your manifest.
 - The payment sheet speaks French: `present({ locale: 'fr' })` asks for it, and without `locale`
   the sheet follows the payment's own language. English otherwise. `StripeCardSection` takes a
   `locale` prop for the same.
-- `@stripe/stripe-react-native` is really optional: the package no longer imports it at load time,
-  so an app that only takes Mobile Money bundles without it. Install it to take cards through
-  Stripe, as before.
-- `@react-native-community/netinfo` is declared as a peer dependency: the realtime client needs it
-  in a React Native bundle.
+- `@stripe/stripe-react-native` is optional: an app that only takes Mobile Money bundles without
+  it. Install it to take cards through Stripe, as before.
+- `@react-native-community/netinfo` is a peer dependency: install it.
 
 Releases before 1.4.1 are described in the Git history.

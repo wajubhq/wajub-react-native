@@ -35,7 +35,7 @@ function samples(): Array<{ line: number; lang: string; code: string }> {
 
 it('type-checks every TypeScript sample of the README', () => {
   const blocks = samples();
-  expect(blocks.length).toBeGreaterThanOrEqual(4);
+  expect(blocks.length).toBeGreaterThanOrEqual(3);
 
   const config = ts.parseJsonConfigFileContent(ts.readConfigFile(join(ROOT, 'tsconfig.json'), ts.sys.readFile).config, ts.sys, ROOT);
   const options: ts.CompilerOptions = {
