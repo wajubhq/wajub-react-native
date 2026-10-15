@@ -71,12 +71,27 @@ describe('MM — Mobile Money', () => {
       expect([v.input, isValidNumber(v.input, v.country, true)]).toEqual([v.input, true]);
       expect([v.input, detectOperator(v.input, v.country, true)]).toEqual([v.input, v.operator]);
       expect([v.input, toE164(v.input, v.country, true)]).toEqual([v.input, v.e164]);
-      // Outside one, the prefixes mean nothing: the numbering plan decides.
-      expect([v.input, detectOperator(v.input, v.country, false)]).toEqual([v.input, detectOperator(v.input, v.country)]);
-      expect([v.input, toE164(v.input, v.country, false)]).toEqual([v.input, toE164(v.input, v.country)]);
     }
-    expect(isValidNumber('+229900000000', 'BJ')).toBe(false);
-    expect(isValidNumber('+229900000000', 'BJ', true)).toBe(true);
+
+    // Outside a sandbox session the prefixes mean nothing: the numbering plan decides.
+    // Test numbers no plan allows are refused…
+    for (const [input, country] of [['+229900000000', 'BJ'], ['+225070000000', 'CI'], ['07000000', 'CI'], ['0000000', 'GA'], ['+2376700000000', 'CM']]) {
+      expect([input, isValidNumber(input, country, true)]).toEqual([input, true]);
+      expect([input, isValidNumber(input, country)]).toEqual([input, false]);
+    }
+    // …a test prefix names the operator of the plan's range, not the sandbox's…
+    const readings: Array<[string, string, string, string | null]> = [
+      ['+22991000000', 'BJ', 'moov', 'mtn'],
+      ['680000000', 'CM', 'eu', 'mtn'],
+      ['03 00 00 00 09', 'CI', 'wave', null],
+    ];
+    for (const [input, country, test, plan] of readings) {
+      expect([input, detectOperator(input, country, true)]).toEqual([input, test]);
+      expect([input, detectOperator(input, country)]).toEqual([input, plan]);
+    }
+    // …and a number is sent in the plan's form, not as read.
+    expect(toE164('0000000', 'GA', true)).toBe('+2410000000');
+    expect(toE164('0000000', 'GA')).not.toBe('+2410000000');
 
     // Through the sheet: a test number the plan refuses goes out as read in a sandbox session…
     const sandbox = await sheet('session-sandbox-cm', 'process-processing-mobile-money-sandbox');
