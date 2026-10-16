@@ -22,8 +22,12 @@ Take Mobile Money, card and wallet payments in your React Native app with a read
 npm install @wajub/react-native @react-native-community/netinfo @react-native-async-storage/async-storage
 # Stripe cards only:
 npm install @stripe/stripe-react-native
+# Optional: the sheet's Copy buttons use it when installed, else React Native's own clipboard:
+npm install @react-native-clipboard/clipboard
 cd ios && pod install
 ```
+
+Optional packages are used when installed and skipped otherwise, through Metro's `allowOptionalDependencies`, which React Native's default Metro configuration turns on.
 
 No provider is needed at the root of your app: `usePayment()` works in any component. `WajubProvider` is optional.
 

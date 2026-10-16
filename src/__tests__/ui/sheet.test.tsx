@@ -440,6 +440,20 @@ describe('UI — payment sheet', () => {
     await act(async () => controller.hostGone());
   });
 
+  it('MM-14 copies with @react-native-clipboard/clipboard when the app has it', () => {
+    const community = { setString: jest.fn() };
+    jest.isolateModules(() => {
+      jest.doMock('@react-native-clipboard/clipboard', () => ({ __esModule: true, default: community }), { virtual: true });
+      const { copyText } = jest.requireActual('../../ui/clipboard') as typeof import('../../ui/clipboard');
+      expect(copyText('*144*4*6#')).toBe(true);
+    });
+    expect(community.setString).toHaveBeenCalledWith('*144*4*6#');
+    // Reading React Native's own here makes it note, once, that it moved.
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(Clipboard.setString).not.toHaveBeenCalled();
+    jest.dontMock('@react-native-clipboard/clipboard');
+  });
+
   it('MM-14 fills the code boxes as typed, replaced or pasted', () => {
     const empty = ['', '', '', '', '', ''];
     expect(typeInBox(empty, 0, '٧')).toEqual({ boxes: ['7', '', '', '', '', ''], focus: 1 });
@@ -468,10 +482,12 @@ describe('UI — payment sheet', () => {
       return controller;
     };
     const openURL = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
-    // React Native's own clipboard says, once, that it moved out of core.
+    // React Native's own clipboard says, once at most, that it moved out of core.
     const warn = console.warn;
+    const moved = jest.fn();
     jest.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
-      if (!String(args[0]).startsWith('Clipboard has been extracted')) warn(...args);
+      if (String(args[0]).startsWith('Clipboard has been extracted')) moved();
+      else warn(...args);
     });
 
     const android = await open('android');
@@ -494,6 +510,11 @@ describe('UI — payment sheet', () => {
     });
     expect(Clipboard.setString).toHaveBeenCalledWith('*144*4*6#');
     expect(screen.getByText('Copied')).toBeTruthy();
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-payer-otp-copy'));
+    });
+    expect(Clipboard.setString).toHaveBeenCalledTimes(2);
+    expect(moved.mock.calls.length).toBeLessThanOrEqual(1);
     // The amount exactly as sent, the steps of the sheet's language from their templates, the sandbox code.
     expect(textOf('wajub-payer-otp-amount')).toBe('1000 XOF');
     expect(textOf('wajub-payer-otp-step-0')).toBe('On the phone of the Orange Money account, dial *144*4*6#.');

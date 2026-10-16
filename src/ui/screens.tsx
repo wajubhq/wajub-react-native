@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from 'react';
-import * as ReactNative from 'react-native';
 import { ActivityIndicator, Linking, Platform, Pressable, Text, View } from 'react-native';
 
 import type { CheckoutController, CheckoutSnapshot, PayerOtpScreen, StepScreen, ThreeDsScreen } from '../checkout/controller';
@@ -10,6 +9,7 @@ import { toAsciiDigits } from '../digits';
 import { formatAmount } from '../i18n';
 import type { PayerOtpInstructions, PaymentSuccess } from '../types';
 import type { WajubError } from '../WajubError';
+import { copyText } from './clipboard';
 import { Banner, Button, CodeBoxes, Field, OperatorLogo, StatusMark, Txt, useNow, weight } from './components';
 import { useSheet } from './theme';
 
@@ -261,18 +261,6 @@ function dial(code: string): void {
   void Linking.openURL(`tel:${code.replace(/#/g, '%23')}`).catch(() => undefined);
 }
 
-/** React Native's own clipboard, read only when Copy is pressed. */
-function copy(text: string): boolean {
-  try {
-    const clipboard = (ReactNative as { Clipboard?: { setString(value: string): void } }).Clipboard;
-    if (!clipboard) return false;
-    clipboard.setString(text);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** The code to dial: a link to the dialer on Android (iOS takes no `*` or `#` in `tel:`), bold elsewhere. */
 function DialCode({ code, testID }: { code: string; testID?: string }) {
   const { theme } = useSheet();
@@ -352,7 +340,7 @@ export function PayerOtpView({ controller, snapshot, screen }: Props & { screen:
             <Txt variant="amount">
               <DialCode code={otp.ussd_code} testID="wajub-payer-otp-dial" />
             </Txt>
-            <Button variant="link" testID="wajub-payer-otp-copy" title={copied ? words.copied : words.copy} onPress={() => setCopied(copy(otp.ussd_code!))} />
+            <Button variant="link" testID="wajub-payer-otp-copy" title={copied ? words.copied : words.copy} onPress={() => setCopied(copyText(otp.ussd_code!))} />
           </View>
         </View>
       ) : null}
