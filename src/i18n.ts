@@ -39,7 +39,8 @@ export interface SheetStrings {
     copied: string;
     amount: string;
     stepsTitle: string;
-    genericSteps: (amount: string) => [string, string, string];
+    /** The three steps when none are given; `amount` null: none was given. */
+    genericSteps: (amount: string | null) => [string, string, string];
     codeLabel: string;
     submit: string;
     changeMethod: string;
@@ -159,7 +160,7 @@ const en: SheetStrings = {
     stepsTitle: 'How to get your code',
     genericSteps: (amount) => [
       "Open your operator's Mobile Money menu (USSD code or app).",
-      `Generate a payment code for the exact amount: ${amount}.`,
+      amount ? `Generate a payment code for the exact amount: ${amount}.` : 'Generate a payment code for the exact amount.',
       'Enter the code you received below.',
     ],
     codeLabel: 'Payment code',
@@ -283,7 +284,7 @@ const fr: SheetStrings = {
     stepsTitle: 'Comment obtenir votre code',
     genericSteps: (amount) => [
       'Ouvrez le menu Mobile Money de votre opérateur (code USSD ou application).',
-      `Générez un code de paiement pour le montant exact : ${amount}.`,
+      amount ? `Générez un code de paiement pour le montant exact : ${amount}.` : 'Générez un code de paiement pour le montant exact.',
       'Saisissez ci-dessous le code que vous avez reçu.',
     ],
     codeLabel: 'Code de paiement',

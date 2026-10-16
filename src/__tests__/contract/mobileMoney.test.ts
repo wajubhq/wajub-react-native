@@ -20,7 +20,8 @@ import { makeController } from '../../test/checkout';
 import { body, fakeApi, fixture, settle } from '../../test/fakeApi';
 import type { Answer, FakeApi } from '../../test/fakeApi';
 import { mapProcessOutcome } from '../../mappers/paymentMapper';
-import { parseProcess, parseSession } from '../../wire/parse';
+import { sheetStrings } from '../../i18n';
+import { parsePayerOtp, parseProcess, parseSession } from '../../wire/parse';
 
 const vectors = JSON.parse(readFileSync(join(__dirname, '..', '..', '__fixtures__', 'mobile-money.vectors.json'), 'utf8'));
 
@@ -287,7 +288,7 @@ describe('MM — the payer\'s own code', () => {
     return { status: 200, body: raw };
   }
 
-  async function bf(session: Answer, process: Answer[], status: Answer | Answer[] = 'status-processing') {
+  async function bf(session: Answer | Answer[], process: Answer[], status: Answer | Answer[] = 'status-processing') {
     api = fakeApi({
       'GET /pay/session': session,
       'GET /pay/sdk-config': 'sdk-config-cm-stripe',
@@ -447,6 +448,171 @@ describe('MM — the payer\'s own code', () => {
     await jest.advanceTimersByTimeAsync(5_000);
     expect(s.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', screen: { name: 'form' }, banner: { code: 'otp_attempts_exceeded' } });
     expect(s.onError).toHaveBeenCalledWith(expect.objectContaining({ code: 'otp_attempts_exceeded' }));
+    s.controller.hostGone();
+  });
+
+  const REFUSED = 'Your operator did not accept this code. Generate a new one and try again.';
+  const EXHAUSTED = 'Your operator refused too many codes for this payment. Choose another payment method.';
+
+  it('MM-13 takes a refusal already known for no news', async () => {
+    jest.useFakeTimers();
+    // Refused (invalid_otp is the baseline now); the next code gets no answer; the status still carries that refusal.
+    const s = await bf(asked(), ['process-payer-otp-required', 'process-payer-otp-refused', 'network'], 'status-pending-payer-otp-refused');
+    await s.pay();
+    await s.controller.submitPayerOtp('654321');
+    await settle();
+    expect(s.controller.getSnapshot().screen).toMatchObject({ name: 'payer_otp', attemptsLeft: 2 });
+    await s.controller.submitPayerOtp('123456');
+    await settle(30);
+    expect(s.controller.getSnapshot().state).toBe('PENDING');
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(api.callsTo('GET /pay/status').length).toBeGreaterThan(0);
+    expect(s.controller.getSnapshot().state).toBe('PENDING');
+    expect(s.onError).not.toHaveBeenCalled();
+    s.controller.hostGone();
+    api.restore();
+
+    // A payment found processing with that refusal on it at load: not news either.
+    const raw = body('session-processing-mobile-money');
+    raw.transaction.error_code = 'invalid_otp';
+    api = fakeApi({ 'GET /pay/session': { status: 200, body: raw }, 'GET /pay/sdk-config': 'sdk-config-cm-stripe', 'GET /pay/status': 'status-pending-payer-otp-refused' });
+    const restored = makeController({ locale: 'en' });
+    restored.controller.start();
+    await settle();
+    expect(restored.controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(restored.controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    restored.controller.hostGone();
+  });
+
+  it('MM-13 sends a refusal no code of this sheet led to back to the form', async () => {
+    jest.useFakeTimers();
+    api = fakeApi({
+      'GET /pay/session': 'session-cm-aggregate',
+      'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+      'POST /pay/process': 'process-processing-mobile-money-sandbox',
+      'GET /pay/status': ['status-processing', 'status-pending-payer-otp-refused'],
+    });
+    const onError = jest.fn();
+    const { controller } = makeController({ locale: 'en', onError });
+    controller.start();
+    await settle();
+    controller.chooseMethod('mobile_money');
+    const mtn = operatorChoices(controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+    await controller.payMobileMoney({ phone: '677123456', country: 'CM', choice: mtn, pickedByHand: true });
+    await settle();
+    expect(controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    await jest.advanceTimersByTimeAsync(5_000);
+    await jest.advanceTimersByTimeAsync(5_000);
+    // Not FAILED "Incorrect code.": the form, the refusal as a note, nothing for onError.
+    expect(controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', screen: { name: 'form' }, banner: { message: REFUSED } });
+    expect(controller.getSnapshot().banner?.message).not.toMatch(/[{}]/);
+    expect(onError).not.toHaveBeenCalled();
+    controller.hostGone();
+  });
+
+  it('MM-13 does not offer a channel again once it refused too many codes', async () => {
+    // Asked by the charge.
+    const s = await bf(asked(), ['process-payer-otp-required', 'process-402-payer-otp-attempts-exceeded']);
+    await s.pay();
+    await s.controller.submitPayerOtp('654323');
+    await settle();
+    expect(s.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', exhausted: ['bf.orange:orange'] });
+    const orange = operatorChoices(s.controller.getSnapshot().session!.channels, 'BF', 'en').find((c) => c.id === 'orange')!;
+    expect(s.controller.unavailable(orange)).toBe(EXHAUSTED);
+    await s.pay();
+    expect(api.callsTo('POST /pay/process')).toHaveLength(2);
+    expect(s.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', screen: { name: 'form' }, fieldErrors: { operator: EXHAUSTED } });
+    s.controller.hostGone();
+    api.restore();
+
+    // Announced: Pay never opens the code screen there again.
+    const announced = await bf('session-payer-otp-announced', ['process-402-payer-otp-attempts-exceeded']);
+    await announced.pay();
+    await announced.controller.submitPayerOtp('654323');
+    await settle();
+    expect(announced.controller.getSnapshot().screen.name).toBe('form');
+    await announced.pay();
+    expect(announced.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', screen: { name: 'form' }, fieldErrors: { operator: EXHAUSTED } });
+    expect(api.callsTo('POST /pay/process')).toHaveLength(1);
+    announced.controller.hostGone();
+  });
+
+  it('MM-13 handles missing instructions and a missing amount', async () => {
+    // Asked for a code without saying how: unsupported, and nothing was charged.
+    const bare = body('process-payer-otp-required');
+    delete bare.payer_otp;
+    const s = await bf(asked(), [{ status: 202, body: bare }]);
+    await s.pay();
+    expect(s.controller.getSnapshot()).toMatchObject({ state: 'FAILED', screen: { name: 'failed', error: { code: 'unsupported_action' } } });
+    expect(s.onPaymentStarted).not.toHaveBeenCalled();
+    s.controller.hostGone();
+
+    const given = body('process-payer-otp-required').payer_otp;
+    expect(parsePayerOtp({ ...given, amount: '' })?.amount).toBe('');
+    expect(parsePayerOtp({ ...given, amount: undefined })?.amount).toBe('');
+    expect(parsePayerOtp({ ...given, amount: 1000 })?.amount).toBe('1000');
+    // The generic step names no amount when none was given.
+    expect(sheetStrings('en').payerOtp.genericSteps(null)[1]).toBe('Generate a payment code for the exact amount.');
+    expect(sheetStrings('fr').payerOtp.genericSteps('1000 XOF')[1]).toBe('Générez un code de paiement pour le montant exact : 1000 XOF.');
+  });
+
+  it('MM-13 reads plain-string steps, skips empty languages and bounds the length', () => {
+    const p = parsePayerOtp({
+      channel: 'bf.orange',
+      ussd_code: '*144*4*6#',
+      otp_length: 6,
+      amount: '1000',
+      currency: 'XOF',
+      steps: { fr: [], en: ['Dial *144*4*6#.', { text: 'Enter the code.' }, 42, ''] },
+    })!;
+    expect(p.steps).toEqual({ en: [{ text: 'Dial *144*4*6#.' }, { text: 'Enter the code.' }] });
+    expect(p.otp_length).toBe(6);
+    for (const length of [0, -3, 13, 6.5, null]) {
+      expect([length, parsePayerOtp({ ...p, otp_length: length })?.otp_length]).toEqual([length, null]);
+    }
+    expect(parsePayerOtp({ ...p, otp_length: 12 })?.otp_length).toBe(12);
+    expect(parsePayerOtp({ ...p, otp_length: 1 })?.otp_length).toBe(1);
+  });
+
+  it('MM-13 keeps the tries left after the local check, and reads a negative count as none', async () => {
+    const negative = body('process-payer-otp-refused');
+    negative.payer_otp.attempts_remaining = -1;
+    const s = await bf(asked(), ['process-payer-otp-required', 'process-payer-otp-refused', { status: 202, body: negative }]);
+    await s.pay();
+    await s.controller.submitPayerOtp('654321');
+    await settle();
+    await s.controller.submitPayerOtp('12');
+    expect(s.controller.getSnapshot()).toMatchObject({
+      fieldErrors: { code: 'The code must have 6 digits.' },
+      screen: { name: 'payer_otp', error: REFUSED, attemptsLeft: 2 },
+    });
+    await s.controller.submitPayerOtp('654322');
+    await settle();
+    const left = (s.controller.getSnapshot().screen as { attemptsLeft: number }).attemptsLeft;
+    expect(sheetStrings('en').payerOtp.attemptsLeft(left)).toBe('No tries left.');
+    s.controller.hostGone();
+  });
+
+  it('MM-13 keeps the code step through a security retry', async () => {
+    const salt = 'a1b2c3d4e5?expires=1760434200';
+    const raw = body('session-payer-otp-announced');
+    raw.altcha = { algorithm: 'SHA-256', challenge: sha256Hex(`${salt}4242`), salt, signature: 'SIGNATURE', maxnumber: 10_000 };
+    const fresh = body('session-payer-otp-announced');
+    fresh.altcha = { ...raw.altcha, challenge: sha256Hex(`${salt}77`) };
+    const s = await bf(
+      [{ status: 200, body: raw }, { status: 200, body: fresh }],
+      ['process-422-security-check-failed', 'process-payer-otp-accepted-sandbox'],
+    );
+    await s.pay();
+    await s.controller.submitPayerOtp('123456');
+    await settle(30);
+    const calls = api.callsTo('POST /pay/process');
+    expect(calls.map((c) => [c.body.data.otp, c.body.data.altcha.number])).toEqual([
+      ['123456', 4242],
+      ['123456', 77],
+    ]);
+    expect(s.controller.getSnapshot()).toMatchObject({ state: 'APPROVAL_REQUIRED', screen: { name: 'approval', codeReceived: true } });
     s.controller.hostGone();
   });
 });

@@ -179,9 +179,10 @@ export function WaitingOnPhone({
       <Txt variant="amount" style={{ textAlign: 'center' }}>
         {amountOf(snapshot, lang)}
       </Txt>
-      {phone ? <Txt style={{ textAlign: 'center' }}>{t.approveBody(phone)}</Txt> : null}
-      <Txt style={{ textAlign: 'center', color: colors.textSecondary }}>{main}</Txt>
-      {instruction && (ussd || lang === 'fr') ? (
+      {/* After the payer's own code: confirmed in the operator's menu already, nothing more to do on the phone. */}
+      {phone && !codeReceived ? <Txt style={{ textAlign: 'center' }}>{t.approveBody(phone)}</Txt> : null}
+      {codeReceived ? null : <Txt style={{ textAlign: 'center', color: colors.textSecondary }}>{main}</Txt>}
+      {instruction && (ussd || lang === 'fr' || codeReceived) ? (
         <View style={{ backgroundColor: colors.surfaceMuted, borderRadius: theme.radius, padding: theme.spacingUnit * 3, gap: theme.spacingUnit }}>
           <Txt variant="label">{t.instructions}</Txt>
           <Txt testID="wajub-payer-instruction">{instruction}</Txt>
@@ -319,15 +320,19 @@ export function PayerOtpView({ controller, snapshot, screen }: Props & { screen:
     const timer = setTimeout(() => setCopied(false), 2000);
     return () => clearTimeout(timer);
   }, [copied]);
-  const steps = otp.steps[lang] ?? otp.steps.en ?? otp.steps.fr ?? [];
-  const generic = steps.length === 0 ? words.genericSteps(`${otp.amount} ${otp.currency}`) : [];
+  // The sheet's language, else English, else French; a language with no step counts as none.
+  const steps = [lang, 'en', 'fr'].map((l) => otp.steps[l]).find((list) => !!list?.length) ?? [];
+  const amount = otp.amount ? `${otp.amount} ${otp.currency}`.trim() : null;
+  const generic = steps.length === 0 ? words.genericSteps(amount) : [];
   const sandbox = snapshot.session?.transaction.sandbox === true;
   const box = { backgroundColor: colors.surfaceMuted, borderRadius: theme.radius, padding: theme.spacingUnit * 3, gap: theme.spacingUnit };
   return (
     <View style={{ gap: theme.gapRow }} testID="wajub-payer-otp">
       <Txt variant="title">{words.title}</Txt>
       <Txt variant="hint">{words.description}</Txt>
-      {screen.error ? <Banner message={screen.error} testID="wajub-payer-otp-error" /> : null}
+      {snapshot.banner ? <Banner message={snapshot.banner.message} testID="wajub-banner" /> : null}
+      {/* Why the last code was not taken, until the payer types another. */}
+      {screen.error && !code ? <Banner message={screen.error} testID="wajub-payer-otp-error" /> : null}
       {screen.attemptsLeft !== null ? (
         <Txt variant="hint" style={{ color: colors.danger }} testID="wajub-payer-otp-attempts">
           {words.attemptsLeft(screen.attemptsLeft)}
@@ -344,11 +349,15 @@ export function PayerOtpView({ controller, snapshot, screen }: Props & { screen:
           </View>
         </View>
       ) : null}
-      <View style={box}>
-        <Txt variant="label">{words.amount}</Txt>
-        {/* Exactly as sent: the payer types it. */}
-        <Txt variant="amount" testID="wajub-payer-otp-amount">{`${otp.amount} ${otp.currency}`}</Txt>
-      </View>
+      {amount ? (
+        <View style={box}>
+          <Txt variant="label">{words.amount}</Txt>
+          {/* Exactly as sent: the payer types it. */}
+          <Txt variant="amount" testID="wajub-payer-otp-amount">
+            {amount}
+          </Txt>
+        </View>
+      ) : null}
       <View style={{ gap: theme.spacingUnit * 2 }}>
         <Txt variant="label">{words.stepsTitle}</Txt>
         {steps.map((step, index) => (

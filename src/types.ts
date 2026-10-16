@@ -207,9 +207,9 @@ export interface PayerOtpInstructions {
   channel: string;
   /** The code to dial; null when the operator's menu has none to show. */
   ussd_code: string | null;
-  /** The code's exact number of digits; null: 4 to 8. */
+  /** The code's exact number of digits (1 to 12); null: 4 to 8. */
   otp_length: number | null;
-  /** The exact amount to type, as sent ("1000", "20.5"): never reformatted. */
+  /** The exact amount to type, as sent ("1000", "20.5"): never reformatted. Empty when not given. */
   amount: string;
   currency: string;
   /** The steps, per language (`en`, `fr`…). */
@@ -220,7 +220,7 @@ export interface PayerOtpInstructions {
 export interface PayerOtpRequest extends PayerOtpInstructions {
   /** `required`: no code was sent; `invalid`: malformed, does not count; `refused`: the operator refused it. */
   reason: string;
-  /** Codes the operator may still refuse on this channel for this payment; null when not known. */
+  /** Codes the operator may still refuse on this channel for this payment (0 or less: none left); null when not known. */
   attempts_remaining: number | null;
 }
 

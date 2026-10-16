@@ -49,6 +49,9 @@
   screen with the code to dial (a link to the dialer on Android, **Copy** everywhere), the exact
   amount and the steps. It reports the new state `PAYER_OTP_REQUIRED`: a `switch` that lists every
   `CheckoutState` needs that case.
+- For your own UI, the channels of `WajubSession.session()` and their operators carry what the
+  payer pays there (`fee_amount`, `amount_total`), a channel that needs that code says how to get
+  it (`payer_otp`), and `mapProcessOutcome()` returns a request for the code as `payerOtp`.
 - Closing the sheet: before any attempt it cancels the payment (unless `cancelOnDismiss: false`);
   during a payment it resolves `processing` and the payment keeps running; on the failure screen
   it resolves `failed` and cancels the payment when it still can be. **Cancel payment** is offered

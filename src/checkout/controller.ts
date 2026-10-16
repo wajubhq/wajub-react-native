@@ -9,7 +9,7 @@ import type { AppStateStatus, NativeEventSubscription } from 'react-native';
 import { openHostedRedirect } from '../adapters/hostedRedirect';
 import { monotonicNow } from '../clock';
 import { toAsciiDigits } from '../digits';
-import { sheetStrings } from '../i18n';
+import { formatAmount, sheetStrings } from '../i18n';
 import { newIdempotencyKey, PayClient } from '../client/payClient';
 import { deviceLocales } from '../client/device';
 import { langOf } from '../errorCatalogue';
@@ -37,9 +37,9 @@ import type {
 import { WajubError } from '../WajubError';
 import type { RawProcessBody } from '../wire/parse';
 import { solveAltcha } from './altcha';
-import { availableMethods, SANDBOX_CARD_FIELDS, shownSlugs } from './methods';
+import { availableMethods, limitOf, SANDBOX_CARD_FIELDS, shownSlugs } from './methods';
 import type { MethodEntry } from './methods';
-import { attemptEnded, POLLING, StatusWatcher, SUCCESS_STATUSES } from './watcher';
+import { attemptEnded, decideStatus, POLLING, StatusWatcher, SUCCESS_STATUSES } from './watcher';
 import type { WatchOutcome } from './watcher';
 
 export const UI_TIMINGS = {
@@ -131,6 +131,11 @@ export interface CheckoutSnapshot {
    * it charged. Null before the payment loads.
    */
   amountDue: number | null;
+  /**
+   * The Mobile Money choices (`channel:operator`) that refused too many of the
+   * payer's codes: not offered again for this payment.
+   */
+  exhausted: string[];
 }
 
 export interface MobileMoneySubmission {
@@ -159,6 +164,8 @@ interface Attempt {
   sentAt?: number;
   /** The status's `error_code` known before it was sent (null: none; undefined: not known). */
   baseline?: string | null;
+  /** Its last answer's (or status's) `error_code` once one came: the refusal already known (README §6.7). */
+  answered?: string | null;
 }
 
 const FINAL_SCREENS = ['success', 'failed', 'expired', 'cancelled'];
@@ -273,7 +280,7 @@ export class CheckoutController {
   /** The Mobile Money form's channel and operator, as selected, picked or detected: what the amount follows. */
   private selection: { channel: string; operator: string | null } | null = null;
   /** The last Mobile Money request: sent again, with the payer's code, from the code screen. */
-  private mobileMoneyRequest: { channel: string; data: Record<string, unknown>; phone: string } | null = null;
+  private mobileMoneyRequest: { channel: string; operator: string; data: Record<string, unknown>; phone: string } | null = null;
   /** The code screen's instructions, kept for a refusal read while watching. */
   private payerOtp: PayerOtpInstructions | null = null;
   private payerOtpRound = 0;
@@ -313,6 +320,7 @@ export class CheckoutController {
       canCancel: false,
       cancelling: false,
       amountDue: null,
+      exhausted: [],
     };
   }
 
@@ -548,9 +556,11 @@ export class CheckoutController {
   private amountDue(next: CheckoutSnapshot): number | null {
     const t = this.transaction;
     if (!t) return null;
-    const total = t.amount_total ?? t.amount;
     // A request accepted (approval, steps, the outcome): what it charged.
-    if (next.screen.name !== 'methods' && next.screen.name !== 'form' && next.screen.name !== 'payer_otp') return total;
+    if (next.screen.name !== 'methods' && next.screen.name !== 'form' && next.screen.name !== 'payer_otp') return t.amount_total ?? t.amount;
+    // Choosing again: the selection's, not what an attempt that ended would have charged.
+    const base = next.session?.transaction ?? t;
+    const total = base.amount_total ?? base.amount;
     const channels = next.session?.channels ?? [];
     const chosen = this.chosen;
     if (!chosen) return total;
@@ -614,6 +624,8 @@ export class CheckoutController {
       started: true,
       phone: null,
       data: {},
+      // The refusal left on the payment at load is not news.
+      baseline: t.error_code,
     };
     if (ctx.is_ussd) {
       this.show({ name: 'ussd', instruction: ctx.payer_instruction ?? null }, 'USSD_REQUIRED');
@@ -745,9 +757,14 @@ export class CheckoutController {
     }
     const choice = input.choice;
     if (!choice) return;
+    const unavailable = this.unavailable(choice);
+    if (unavailable) {
+      this.update({ fieldErrors: { operator: unavailable } });
+      return;
+    }
     const detected = detectOperator(input.phone, input.country, sandbox);
     const data = mobileMoneyRequestData(input.phone, input.country, operatorHint(choice, input.pickedByHand, detected), sandbox);
-    this.mobileMoneyRequest = { channel: choice.channel, data, phone: data.phone };
+    this.mobileMoneyRequest = { channel: choice.channel, operator: choice.id, data, phone: data.phone };
     // A channel that announces the payer's own code: its screen first, no request yet (README §6.7).
     const announced = this.snapshot.session?.channels.find((c) => c.slug === choice.channel && !c.operators?.length)?.payer_otp;
     if (announced) {
@@ -756,6 +773,23 @@ export class CheckoutController {
       return this.showPayerOtp(announced, null, null);
     }
     await this.runAttempt(choice.channel, 'mobile_money', data, data.phone);
+  }
+
+  /**
+   * Why a Mobile Money choice cannot be paid with, in the sheet's language:
+   * its channel refused too many of the payer's codes, or what the payer would
+   * pay there is outside the channel's limits. Null when it can.
+   */
+  unavailable(choice: { channel: string; id: string }): string | null {
+    if (this.snapshot.exhausted.includes(`${choice.channel}:${choice.id}`)) return WajubError.create('otp_attempts_exceeded', { lang: this.lang }).message;
+    const session = this.snapshot.session;
+    const channel = session?.channels.find((c) => c.slug === choice.channel);
+    if (!session || !channel) return null;
+    const limit = limitOf(channel, session.transaction.amount_total ?? session.transaction.amount, choice.id);
+    if (!limit) return null;
+    const words = sheetStrings(this.lang);
+    const currency = session.transaction.currency;
+    return limit.min !== undefined ? words.minimum(formatAmount(limit.min, currency, this.lang)) : words.maximum(formatAmount(limit.max ?? 0, currency, this.lang));
   }
 
   private choicesFor(country: string, method: Extract<MethodEntry, { kind: 'mobile_money' }>): OperatorChoice[] {
@@ -900,11 +934,18 @@ export class CheckoutController {
 
   /** A 2xx: HTTP status, `action` and `transaction.status` decide — never `message`. */
   private handleAnswer(body: RawProcessBody): void {
-    if (body.action === 'payer_otp' && body.payer_otp) {
+    if (body.action === 'payer_otp') {
       // Nothing was charged: no onPaymentStarted, the payment is still pending and payable.
       this.inFlight = false;
       this.knownStatus = 'pending';
-      if (body.transaction) this.absorb(body.transaction);
+      if (body.transaction) {
+        this.absorb(body.transaction);
+        // A refused code's `invalid_otp` is the new baseline: a later status still carrying it is not news.
+        if (body.transaction.error_code !== undefined) this.knownErrorCode = body.transaction.error_code;
+      }
+      if (this.attempt) this.attempt.answered = body.transaction?.error_code ?? null;
+      // Without its instructions there is nothing to show: unsupported, though nothing was charged.
+      if (!body.payer_otp) return this.fail(WajubError.create('unsupported_action', { lang: this.lang, apiMessage: body.action }));
       const request = body.payer_otp;
       const words = sheetStrings(this.lang).payerOtp;
       const error =
@@ -918,6 +959,7 @@ export class CheckoutController {
       return this.showPayerOtp(request, error, request.reason === 'refused' ? request.attempts_remaining : null);
     }
     this.markStarted(body.transaction?.status);
+    if (this.attempt && body.transaction) this.attempt.answered = body.transaction.error_code ?? null;
     if (!body.transaction) {
       // Accepted, but without the payment: an unknown outcome — watched, never a failure, and read
       // as a request without an answer: a newer refusal ends it, a `pending` a minute on sends the
@@ -1040,7 +1082,7 @@ export class CheckoutController {
       this.knownStatus = 'pending';
     }
     // The operator refused too many of the payer's codes: payable on another method, not this one.
-    if (status === 402 && error.code === 'otp_attempts_exceeded') return this.backToMobileMoneyForm(error.localized(this.lang));
+    if (status === 402 && error.code === 'otp_attempts_exceeded') return this.exhaust(error.localized(this.lang), true);
     this.fail(error.localized(this.lang));
   }
 
@@ -1507,6 +1549,8 @@ export class CheckoutController {
       seenProcessing,
       deadline: attemptStart + POLLING.overallCapMs,
       onOutcome: (outcome) => this.onWatchOutcome(outcome),
+      // A payer-code refusal already known is the earlier attempt's, not this one's end.
+      decide: (status, seen) => (this.knownRefusal(status) ? null : decideStatus(status, seen, this.lang)),
       onStatus: (status) => {
         this.knownStatus = status.status;
         if (this.checkPayerOtpRefusal(status)) return;
@@ -1553,38 +1597,70 @@ export class CheckoutController {
     this.backToMobileMoneyForm(null);
   }
 
-  private backToMobileMoneyForm(banner: WajubError | null): void {
+  /** The Mobile Money form again; `notify`: the banner is an error the host hears of (`onError`). */
+  private backToMobileMoneyForm(banner: WajubError | null, notify = banner !== null, patch: Partial<CheckoutSnapshot> = {}): void {
     this.stopWatching();
     this.payerOtp = null;
     this.inFlight = false;
     this.knownStatus = 'pending';
     this.attempt = null;
     const method = this.snapshot.methods.find((m) => m.kind === 'mobile_money') ?? this.chosen;
-    this.show(method ? { name: 'form', method } : { name: 'methods' }, method ? 'COLLECTING_DETAILS' : 'INITIATED', { busy: false, banner, fieldErrors: {} });
-    if (banner) this.emit('onError', banner);
+    this.show(method ? { name: 'form', method } : { name: 'methods' }, method ? 'COLLECTING_DETAILS' : 'INITIATED', { busy: false, banner, fieldErrors: {}, ...patch });
+    if (banner && notify) this.emit('onError', banner);
+  }
+
+  /** Too many codes refused on the channel last paid with: not offered again for this payment. */
+  private exhaust(error: WajubError, notify: boolean): void {
+    const request = this.mobileMoneyRequest;
+    const key = request ? `${request.channel}:${request.operator}` : null;
+    const exhausted = key && !this.snapshot.exhausted.includes(key) ? [...this.snapshot.exhausted, key] : this.snapshot.exhausted;
+    this.backToMobileMoneyForm(error, notify, { exhausted });
+  }
+
+  /** The refusal the last answer (else the request) already knew: not news (README §6.7). */
+  private refusalBaseline(): string | null | undefined {
+    const attempt = this.attempt;
+    if (!attempt) return this.knownErrorCode;
+    return attempt.answered !== undefined ? attempt.answered : attempt.baseline;
+  }
+
+  /** A `pending` still carrying a payer-code refusal already known. */
+  private knownRefusal(status: PaymentStatus): boolean {
+    const code = status.error_code ?? null;
+    return status.status === 'pending' && (code === 'invalid_otp' || code === 'otp_attempts_exceeded') && code === this.refusalBaseline();
   }
 
   /**
-   * After the payer's code was sent, a `pending` status with `invalid_otp`:
-   * the operator refused the code (the count is not known here); with
-   * `otp_attempts_exceeded`, no more codes on this channel.
+   * A payer-code refusal newer than the last answer (README §6.7). With
+   * `invalid_otp`: after a code from this sheet, the code screen again with
+   * the refused text (the count is not known here); with no code sent from
+   * this sheet, the Mobile Money form with that text, no `onError`. With
+   * `otp_attempts_exceeded`, the form, the channel not offered again.
    */
   private checkPayerOtpRefusal(status: PaymentStatus): boolean {
-    if (!this.payerOtp || this.attempt?.data.otp === undefined || status.status !== 'pending') return false;
-    if (status.error_code === 'invalid_otp' || status.error_code === 'otp_attempts_exceeded') this.knownErrorCode = status.error_code;
-    if (status.error_code === 'invalid_otp') {
+    const attempt = this.attempt;
+    // Under way again: a refusal before this is no longer the one known.
+    if (attempt && (status.status === 'processing' || status.status === 'partial')) attempt.answered = status.error_code ?? null;
+    const code = status.error_code ?? null;
+    if (status.status !== 'pending' || (code !== 'invalid_otp' && code !== 'otp_attempts_exceeded') || this.knownRefusal(status)) return false;
+    this.knownErrorCode = code;
+    const words = sheetStrings(this.lang).payerOtp;
+    if (code === 'otp_attempts_exceeded') {
+      this.exhaust(WajubError.create('otp_attempts_exceeded', { lang: this.lang }), true);
+      return true;
+    }
+    if (attempt?.data.otp !== undefined && this.payerOtp) {
       this.stopWatching();
       this.inFlight = false;
       this.knownStatus = 'pending';
       this.attempt = null;
-      this.showPayerOtp(this.payerOtp, sheetStrings(this.lang).payerOtp.refused, null);
+      this.showPayerOtp(this.payerOtp, words.refused, null);
       return true;
     }
-    if (status.error_code === 'otp_attempts_exceeded') {
-      this.backToMobileMoneyForm(WajubError.create('otp_attempts_exceeded', { lang: this.lang }));
-      return true;
-    }
-    return false;
+    // A code sent elsewhere was refused: the form, with the refusal as a note, not a failure.
+    const refused = WajubError.create('invalid_otp', { lang: this.lang });
+    this.backToMobileMoneyForm(new WajubError({ ...refused.toJSON(), message: words.refused, details: refused.details, retryable: true }), false);
+    return true;
   }
 
   /**
@@ -1704,7 +1780,7 @@ export class CheckoutController {
   private notSent(error: WajubError): void {
     if (this.settled || this.finished()) return;
     this.inFlight = false;
-    this.show(this.snapshot.screen, 'COLLECTING_DETAILS', { busy: false, banner: error });
+    this.show(this.snapshot.screen, this.snapshot.screen.name === 'payer_otp' ? 'PAYER_OTP_REQUIRED' : 'COLLECTING_DETAILS', { busy: false, banner: error });
     this.emit('onError', error);
   }
 

@@ -152,12 +152,17 @@ export function parseTransaction(raw: unknown, strict = false): SessionTransacti
   return keep(t, transaction, ['customer', 'processing_context', 'error_code']);
 }
 
-/** The steps of each language, each with its `text` (and `template` when it has one). */
+/**
+ * The steps of each language, each with its `text` (and `template` when it
+ * has one); a step given as a plain string is its text. A language with no
+ * step is left out, so the next one applies.
+ */
 function parsePayerOtpSteps(raw: unknown): Record<string, PayerOtpStep[]> {
   const steps: Record<string, PayerOtpStep[]> = {};
   for (const [lang, list] of Object.entries(obj(raw) ?? {})) {
-    steps[lang] = arr(list)
+    const parsed = arr(list)
       .map((entry) => {
+        if (typeof entry === 'string') return entry.trim() ? { text: entry } : undefined;
         const e = obj(entry);
         const stepText = str(e?.text);
         if (!e || stepText === undefined) return undefined;
@@ -167,6 +172,7 @@ function parsePayerOtpSteps(raw: unknown): Record<string, PayerOtpStep[]> {
         return step;
       })
       .filter((s): s is PayerOtpStep => !!s);
+    if (parsed.length > 0) steps[lang] = parsed;
   }
   return steps;
 }
@@ -176,11 +182,14 @@ export function parsePayerOtp(raw: unknown): PayerOtpInstructions | undefined {
   const p = obj(raw);
   if (!p) return undefined;
   const length = num(p.otp_length);
+  // Typed as sent; a number is read as it is written.
+  const amount = typeof p.amount === 'number' && Number.isFinite(p.amount) ? String(p.amount) : (str(p.amount) ?? '').trim();
   return keep(p, {
     channel: str(p.channel) ?? '',
     ussd_code: nullable(text(p.ussd_code)),
-    otp_length: length !== undefined && length > 0 ? Math.round(length) : null,
-    amount: str(p.amount) ?? '',
+    // 1 to 12 digits; anything else is no length known.
+    otp_length: length !== undefined && Number.isInteger(length) && length >= 1 && length <= 12 ? length : null,
+    amount,
     currency: str(p.currency) ?? '',
     steps: parsePayerOtpSteps(p.steps),
   });

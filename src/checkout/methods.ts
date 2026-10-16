@@ -93,9 +93,13 @@ function mobileMoneyHidden(channel: SessionChannel, config: SdkConfig | null): S
   return operators.length > 0 ? { ...channel, operators } : null;
 }
 
-function limitOf(channel: SessionChannel, transactionTotal: number): MethodLimit | null {
-  // The channel's own total when the payer's fee follows the channel (README §5.3).
-  const amount = channel.amount_total ?? transactionTotal;
+/**
+ * The channel's limits against what the payer would pay there (README §5.3):
+ * the chosen operator's total, else the channel's, else the payment's.
+ */
+export function limitOf(channel: SessionChannel, transactionTotal: number, operator?: string | null): MethodLimit | null {
+  const member = operator ? channel.operators?.find((o) => o.operator === operator) : undefined;
+  const amount = member?.amount_total ?? channel.amount_total ?? transactionTotal;
   if (channel.min_amount !== undefined && channel.min_amount > amount) return { min: channel.min_amount };
   if (channel.max_amount !== undefined && channel.max_amount < amount) return { max: channel.max_amount };
   return null;

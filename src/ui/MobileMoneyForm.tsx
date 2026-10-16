@@ -39,7 +39,14 @@ export function MobileMoneyForm({
   const countries = useMemo(() => mobileMoneyCountries(method.channels), [method.channels]);
   const [country, setCountry] = useState(() => defaultCountry(method.channels, options.country, session.geo_country));
   const choices = useMemo(() => operatorChoices(method.channels, country, lang), [method.channels, country, lang]);
-  const [selected, setSelected] = useState<string | null>(() => initialChoice(choices));
+  // Shown disabled with why: a channel that refused too many codes, or one whose limits exclude what the payer would pay.
+  const unavailable = useMemo(
+    () => Object.fromEntries(choices.map((c) => [c.id, controller.unavailable(c)])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [controller, choices, snapshot.exhausted, snapshot.lang],
+  );
+  const offered = useMemo(() => choices.filter((c) => !unavailable[c.id]), [choices, unavailable]);
+  const [selected, setSelected] = useState<string | null>(() => initialChoice(offered));
   const [pickedByHand, setPickedByHand] = useState(false);
   const [phone, setPhone] = useState('');
   const [listOpened, setListOpened] = useState(false);
@@ -49,13 +56,13 @@ export function MobileMoneyForm({
   useEffect(() => {
     const sandboxSession = session.transaction.sandbox === true;
     setSelected((current) => {
-      const kept = choices.some((c) => c.id === current) ? current : initialChoice(choices);
-      return preselect(kept, false, phone, country, choices, sandboxSession);
+      const kept = offered.some((c) => c.id === current) ? current : initialChoice(offered);
+      return preselect(kept, false, phone, country, offered, sandboxSession);
     });
     setPickedByHand(false);
     // The number and country are read as they are when the choices change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [choices]);
+  }, [offered]);
 
   const rules = countryRules(country);
   const sandbox = session.transaction.sandbox === true;
@@ -81,13 +88,14 @@ export function MobileMoneyForm({
   const showCountries = countries.length > 1 && !(options.countryLocked && options.country && countries.includes(options.country.toUpperCase()));
 
   const pick = (id: string) => {
+    if (unavailable[id]) return;
     setSelected(id);
     setPickedByHand(true);
   };
   const onPhone = (value: string) => {
     const formatted = formatAsYouType(value);
     setPhone(formatted);
-    setSelected((current) => preselect(current, pickedByHand, formatted, country, choices, sandbox));
+    setSelected((current) => preselect(current, pickedByHand, formatted, country, offered, sandbox));
   };
   const total = snapshot.amountDue ?? session.transaction.amount_total ?? session.transaction.amount;
 
@@ -138,15 +146,18 @@ export function MobileMoneyForm({
           >
             {choices.map((choice, index) => {
               const active = choice.id === selected;
+              const reason = unavailable[choice.id];
               return (
                 <Pressable
                   key={choice.id}
                   testID={`wajub-operator-${choice.id}`}
                   accessibilityRole="radio"
                   accessibilityLabel={choice.label}
-                  accessibilityState={{ selected: active }}
+                  accessibilityState={{ selected: active, disabled: !!reason }}
+                  disabled={!!reason}
                   onPress={() => pick(choice.id)}
                   style={{
+                    opacity: reason ? 0.5 : 1,
                     flexDirection: 'row',
                     alignItems: 'center',
                     gap: theme.spacingUnit * 3,
@@ -159,9 +170,16 @@ export function MobileMoneyForm({
                   }}
                 >
                   <OperatorLogo operator={choice.id} name={choice.name} logo={choice.logo} />
-                  <Text style={{ flex: 1, color: colors.text, fontFamily: theme.fontFamily, fontSize: theme.fontSizeBase, fontWeight: weight(theme.fontWeightMedium) }}>
-                    {choice.label}
-                  </Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: colors.text, fontFamily: theme.fontFamily, fontSize: theme.fontSizeBase, fontWeight: weight(theme.fontWeightMedium) }}>
+                      {choice.label}
+                    </Text>
+                    {reason ? (
+                      <Txt variant="hint" testID={`wajub-operator-${choice.id}-unavailable`}>
+                        {reason}
+                      </Txt>
+                    ) : null}
+                  </View>
                   <View
                     style={{
                       width: 20,
@@ -217,7 +235,7 @@ export function MobileMoneyForm({
         title={t.payAmount(formatAmount(total, session.transaction.currency, lang))}
         onPress={() => void controller.payMobileMoney({ phone, country, choice: selectedChoice, pickedByHand })}
         loading={snapshot.busy}
-        disabled={choices.length === 0}
+        disabled={offered.length === 0}
       />
     </View>
   );

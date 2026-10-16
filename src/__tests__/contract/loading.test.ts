@@ -1,4 +1,5 @@
-import { availableMethods, mobileMoneyConfig } from '../../checkout/methods';
+import { availableMethods, limitOf, mobileMoneyConfig } from '../../checkout/methods';
+import { formatAmount } from '../../i18n';
 import { operatorChoices } from '../../mobileMoney/form';
 import type { MethodEntry } from '../../checkout/methods';
 import { makeController } from '../../test/checkout';
@@ -485,6 +486,51 @@ describe('CH — channels', () => {
     expect({ ...sent.data, _client: undefined }).toEqual({ phone: '+237690000000', country: 'CM', operator: 'orange', _client: undefined });
     expect(controller.getSnapshot()).toMatchObject({ state: 'APPROVAL_REQUIRED', amountDue: reference.transaction.amount_total });
     expect(reference.transaction.amount_total).toBe(10_450);
+    controller.hostGone();
+  });
+
+  it('CH-05 compares a limit with the chosen operator\'s total, else the channel\'s', async () => {
+    const raw = body('session-payer-fee-per-channel');
+    raw.channels[0].max_amount = 10_300;
+    const channel = parseSession(raw).channels[0];
+    expect(limitOf(channel, 10_200)).toBeNull();
+    expect(limitOf(channel, 10_200, 'mtn')).toBeNull();
+    expect(limitOf(channel, 10_200, 'orange')).toEqual({ max: 10_300 });
+    const { controller } = await load({ status: 200, body: raw }, 'sdk-config-cm-stripe', { locale: 'en' });
+    controller.chooseMethod('mobile_money');
+    const choices = operatorChoices(controller.getSnapshot().session!.channels, 'CM', 'en');
+    const orange = choices.find((c) => c.id === 'orange')!;
+    expect(controller.unavailable(choices.find((c) => c.id === 'mtn')!)).toBeNull();
+    expect(controller.unavailable(orange)).toBe(`Maximum ${formatAmount(10_300, 'XAF', 'en')}`);
+    // Orange's 10 450 is over the channel's 10 300: nothing is sent.
+    await controller.payMobileMoney({ phone: '690000000', country: 'CM', choice: orange, pickedByHand: true });
+    expect(api.callsTo('POST /pay/process')).toHaveLength(0);
+    expect(controller.getSnapshot().fieldErrors.operator).toBe(`Maximum ${formatAmount(10_300, 'XAF', 'en')}`);
+    controller.hostGone();
+  });
+
+  it('CH-07 shows the selection\'s amount again once an attempt ended', async () => {
+    jest.useFakeTimers();
+    const { controller } = await load('session-payer-fee-per-channel');
+    api.answer('POST /pay/process', 'process-payer-fee-on-channel-sandbox');
+    api.answer('GET /pay/status', ['status-processing', 'status-pending-attempt-refused']);
+    controller.chooseMethod('mobile_money');
+    const choices = operatorChoices(controller.getSnapshot().session!.channels, 'CM', 'en');
+    const orange = choices.find((c) => c.id === 'orange')!;
+    controller.selectMobileMoney(orange.channel, orange.id);
+    await controller.payMobileMoney({ phone: '690000000', country: 'CM', choice: orange, pickedByHand: false });
+    await settle();
+    expect(controller.getSnapshot().amountDue).toBe(10_450);
+    await jest.advanceTimersByTimeAsync(5_000);
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(controller.getSnapshot().state).toBe('FAILED');
+    controller.tryAgain();
+    expect(controller.getSnapshot().screen.name).toBe('form');
+    controller.selectMobileMoney('cm.mobile', 'mtn');
+    expect(controller.getSnapshot().amountDue).toBe(10_200);
+    // The method list: the payment's 10 200, not the 10 450 of the attempt that ended.
+    controller.backToMethods();
+    expect(controller.getSnapshot().amountDue).toBe(10_200);
     controller.hostGone();
   });
 

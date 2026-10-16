@@ -311,7 +311,7 @@ describe('UI — payment sheet', () => {
     const session = body('session-cm-aggregate');
     const ivorian = body('session-ci-xof-wallets').channels.filter((c: { slug: string }) => ['ci.mtn', 'ci.orange'].includes(c.slug));
     session.channels = [...session.channels, ...ivorian];
-    await show({ locale: 'en', mobileMoney: { country: 'CM' } }, routes({ 'GET /pay/session': { status: 200, body: session } }));
+    const controller = await show({ locale: 'en', mobileMoney: { country: 'CM' } }, routes({ 'GET /pay/session': { status: 200, body: session } }));
     await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
     await act(async () => {
       fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
@@ -327,10 +327,11 @@ describe('UI — payment sheet', () => {
     });
     expect(screen.getByTestId('wajub-operator-orange').props.accessibilityState).toMatchObject({ selected: true });
     expect(screen.getByTestId('wajub-operator-mtn').props.accessibilityState).toMatchObject({ selected: false });
+    await act(async () => controller.hostGone());
   });
 
   it('MM-01 reads a number typed with Arabic-Indic digits', async () => {
-    await show({ locale: 'en' }, routes({ 'POST /pay/process': 'process-processing-mobile-money-live' }));
+    const controller = await show({ locale: 'en' }, routes({ 'POST /pay/process': 'process-processing-mobile-money-live' }));
     await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
     await act(async () => {
       fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
@@ -347,6 +348,8 @@ describe('UI — payment sheet', () => {
     await waitFor(() => expect(api.callsTo('POST /pay/process')).toHaveLength(1));
     expect(api.callsTo('POST /pay/process')[0].body.data.phone).toBe('+237691234567');
     expect(screen.queryByTestId('wajub-phone-error')).toBeNull();
+    // Closed: its watch stops with it.
+    await act(async () => controller.hostGone());
   });
 
   it('CF-01 shows where the one-time code was sent, and only that', async () => {
@@ -440,7 +443,131 @@ describe('UI — payment sheet', () => {
     await act(async () => controller.hostGone());
   });
 
+  it('MM-13 hides a refusal as a new code is typed, keeps the tries left, and disables an exhausted channel', async () => {
+    const asked = body('session-payer-otp-announced');
+    delete asked.channels[0].payer_otp;
+    const controller = await show(
+      { locale: 'en' },
+      routes({
+        'GET /pay/session': { status: 200, body: asked },
+        'POST /pay/process': ['process-payer-otp-required', 'process-payer-otp-refused', 'process-402-payer-otp-attempts-exceeded'],
+      }),
+    );
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
+    });
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-phone'), '70000000');
+    });
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-pay'));
+    });
+    await waitFor(() => screen.getByTestId('wajub-payer-otp'));
+    const box = (i: number) => screen.getByTestId(`wajub-payer-otp-code-${i}`);
+    const submit = async () => {
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('wajub-payer-otp-submit'));
+      });
+    };
+    await act(async () => {
+      fireEvent.changeText(box(0), '654321');
+    });
+    await submit();
+    await waitFor(() => screen.getByTestId('wajub-payer-otp-error'));
+    expect(textOf('wajub-payer-otp-error')).toBe('Your operator did not accept this code. Generate a new one and try again.');
+    expect(textOf('wajub-payer-otp-attempts')).toBe('2 tries left.');
+    // A new code typed: the refusal goes, the tries left stay, through a code that fails the local check too.
+    await act(async () => {
+      fireEvent.changeText(box(0), '6');
+    });
+    expect(screen.queryByTestId('wajub-payer-otp-error')).toBeNull();
+    await submit();
+    expect(screen.getByText('The code must have 6 digits.')).toBeTruthy();
+    expect(textOf('wajub-payer-otp-attempts')).toBe('2 tries left.');
+    // Too many codes refused: the form, the channel shown disabled with why, nothing to pay with there.
+    await act(async () => {
+      fireEvent.changeText(box(1), '654323');
+    });
+    await submit();
+    await waitFor(() => screen.getByTestId('wajub-phone'));
+    const exhausted = 'Your operator refused too many codes for this payment. Choose another payment method.';
+    expect(textOf('wajub-banner')).toBe(exhausted);
+    expect(screen.getByTestId('wajub-operator-orange').props.accessibilityState).toMatchObject({ disabled: true });
+    expect(textOf('wajub-operator-orange-unavailable')).toBe(exhausted);
+    expect(screen.getByTestId('wajub-pay').props.accessibilityState).toMatchObject({ disabled: true });
+    await act(async () => controller.hostGone());
+  });
+
+  it('MM-13 falls back to the English steps and shows no amount when none is given', async () => {
+    const open = async (payerOtp: Record<string, unknown>) => {
+      const raw = body('session-payer-otp-announced');
+      raw.channels[0].payer_otp = { ...raw.channels[0].payer_otp, ...payerOtp };
+      const controller = await show({ locale: 'fr' }, routes({ 'GET /pay/session': { status: 200, body: raw } }));
+      await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
+      });
+      await act(async () => {
+        fireEvent.changeText(screen.getByTestId('wajub-phone'), '70000000');
+      });
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('wajub-pay'));
+      });
+      await waitFor(() => screen.getByTestId('wajub-payer-otp'));
+      return controller;
+    };
+    const english = body('session-payer-otp-announced').channels[0].payer_otp.steps.en;
+    const empty = await open({ steps: { fr: [], en: english }, amount: '' });
+    // No French step: the English ones, not the generic three. No amount: no amount box.
+    expect(textOf('wajub-payer-otp-step-0')).toBe('On the phone of the Orange Money account, dial *144*4*6#.');
+    expect(screen.queryByTestId('wajub-payer-otp-amount')).toBeNull();
+    await act(async () => empty.hostGone());
+    screen.unmount();
+    api.restore();
+
+    const none = await open({ steps: {}, amount: '' });
+    expect(textOf('wajub-payer-otp-step-1')).toBe('Générez un code de paiement pour le montant exact.');
+    expect(screen.queryByText(/ XOF/)).toBeNull();
+    await act(async () => none.hostGone());
+  });
+
+  it('MM-14 shows Copy again 2 s after Copied', async () => {
+    const controller = await show({ locale: 'en' }, routes({ 'GET /pay/session': 'session-payer-otp-announced' }));
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
+    });
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-phone'), '70000000');
+    });
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-pay'));
+    });
+    await waitFor(() => screen.getByTestId('wajub-payer-otp'));
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    jest.useFakeTimers();
+    try {
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('wajub-payer-otp-copy'));
+      });
+      expect(screen.getByText('Copied')).toBeTruthy();
+      await act(async () => {
+        jest.advanceTimersByTime(1_900);
+      });
+      expect(screen.getByText('Copied')).toBeTruthy();
+      await act(async () => {
+        jest.advanceTimersByTime(200);
+      });
+      expect(screen.getByText('Copy')).toBeTruthy();
+    } finally {
+      jest.useRealTimers();
+    }
+    await act(async () => controller.hostGone());
+  });
+
   it('MM-14 copies with @react-native-clipboard/clipboard when the app has it', () => {
+    (Clipboard.setString as jest.Mock).mockClear();
     const community = { setString: jest.fn() };
     jest.isolateModules(() => {
       jest.doMock('@react-native-clipboard/clipboard', () => ({ __esModule: true, default: community }), { virtual: true });
@@ -482,6 +609,7 @@ describe('UI — payment sheet', () => {
       return controller;
     };
     const openURL = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+    (Clipboard.setString as jest.Mock).mockClear();
     // React Native's own clipboard says, once at most, that it moved out of core.
     const warn = console.warn;
     const moved = jest.fn();
@@ -559,6 +687,9 @@ describe('UI — payment sheet', () => {
     await waitFor(() => screen.getByTestId('wajub-approval'));
     expect(api.callsTo('POST /pay/process')[0].body.data).toMatchObject({ phone: '+22670000000', otp: '123456' });
     expect(textOf('wajub-approval-title')).toBe('Code received. Your operator is processing the payment, this can take a moment.');
+    // Confirmed in the operator's menu already: no phone line, no "no code to enter" line.
+    expect(screen.queryByText('A request was sent to +22670000000.')).toBeNull();
+    expect(screen.queryByText('Check your phone. No code to enter.')).toBeNull();
     await act(async () => android.hostGone());
     screen.unmount();
     api.restore();
