@@ -13,7 +13,7 @@ import {
   mobileMoneyData,
   sanitize,
 } from '../mobileMoney/data';
-import { defaultCountry, mobileMoneyCountries, operatorChoices, preselect } from '../mobileMoney/form';
+import { defaultCountry, initialChoice, mobileMoneyCountries, operatorChoices, preselect } from '../mobileMoney/form';
 import type { OperatorChoice } from '../mobileMoney/form';
 import { Banner, Button, Field, OperatorLogo, Txt, weight } from './components';
 import { useSheet } from './theme';
@@ -39,7 +39,7 @@ export function MobileMoneyForm({
   const countries = useMemo(() => mobileMoneyCountries(method.channels), [method.channels]);
   const [country, setCountry] = useState(() => defaultCountry(method.channels, options.country, session.geo_country));
   const choices = useMemo(() => operatorChoices(method.channels, country, lang), [method.channels, country, lang]);
-  const [selected, setSelected] = useState<string | null>(choices[0]?.id ?? null);
+  const [selected, setSelected] = useState<string | null>(() => initialChoice(choices));
   const [pickedByHand, setPickedByHand] = useState(false);
   const [phone, setPhone] = useState('');
   const [listOpened, setListOpened] = useState(false);
@@ -49,7 +49,7 @@ export function MobileMoneyForm({
   useEffect(() => {
     const sandboxSession = session.transaction.sandbox === true;
     setSelected((current) => {
-      const kept = choices.some((c) => c.id === current) ? current : (choices[0]?.id ?? null);
+      const kept = choices.some((c) => c.id === current) ? current : initialChoice(choices);
       return preselect(kept, false, phone, country, choices, sandboxSession);
     });
     setPickedByHand(false);

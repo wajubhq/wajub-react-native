@@ -91,6 +91,15 @@ export function operatorChoices(channels: SessionChannel[], country: string, lan
 }
 
 /**
+ * The choice before any number is typed: the first network operator, never a
+ * wallet held whatever the operator; the first choice when every one is such
+ * a wallet.
+ */
+export function initialChoice(choices: OperatorChoice[]): string | null {
+  return (choices.find((c) => !isOperatorIndependent(c.id)) ?? choices[0])?.id ?? null;
+}
+
+/**
  * The selection after the number changed: a detected operator among the
  * choices, while the payer has not picked one by hand; otherwise unchanged.
  */

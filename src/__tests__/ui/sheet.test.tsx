@@ -388,8 +388,10 @@ describe('UI — payment sheet', () => {
     await act(async () => {
       fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
     });
-    // An Express Union line first (no logo: its badge), then the aggregate's operators.
-    expect(screen.getByTestId('wajub-operator-eu').props.accessibilityState).toMatchObject({ selected: true });
+    // An Express Union line first (no logo: its badge), then the aggregate's operators. Before any
+    // number the first network operator is chosen, never a wallet held whatever the operator (MM-03).
+    expect(screen.getByTestId('wajub-operator-eu').props.accessibilityState).toMatchObject({ selected: false });
+    expect(screen.getByTestId('wajub-operator-mtn').props.accessibilityState).toMatchObject({ selected: true });
     await act(async () => {
       fireEvent.changeText(screen.getByTestId('wajub-phone'), '670000000');
     });

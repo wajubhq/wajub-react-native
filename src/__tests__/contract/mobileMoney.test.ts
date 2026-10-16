@@ -14,7 +14,7 @@ import {
   sandboxTestNumber,
   toE164,
 } from '../../mobileMoney/data';
-import { operatorChoices, operatorHint, preselect, validateMobileMoney } from '../../mobileMoney/form';
+import { initialChoice, operatorChoices, operatorHint, preselect, validateMobileMoney } from '../../mobileMoney/form';
 import type { OperatorChoice } from '../../mobileMoney/form';
 import { makeController } from '../../test/checkout';
 import { body, fakeApi, fixture, settle } from '../../test/fakeApi';
@@ -164,9 +164,14 @@ describe('MM — Mobile Money', () => {
   it('MM-03 matches the preselection vectors', () => {
     for (const v of vectors.preselection) {
       const choices = v.choices.map((id: string) => choice(id));
-      const current = v.picked_by_hand ?? choices[0].id;
+      // Before any number: the first network operator, never a wallet held whatever the operator.
+      const current = v.picked_by_hand ?? initialChoice(choices);
       expect([v.phone, preselect(current, v.picked_by_hand !== null, v.phone, v.country, choices)]).toEqual([v.phone, v.expected_selection]);
     }
+    // Every choice a wallet held whatever the operator: the first; none at all: nothing.
+    expect(initialChoice([choice('eu'), choice('mtn')])).toBe('mtn');
+    expect(initialChoice([choice('wave'), choice('eu')])).toBe('wave');
+    expect(initialChoice([])).toBeNull();
   });
 
   it('MM-04 lists aggregate operators', () => {
