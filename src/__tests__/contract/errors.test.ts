@@ -17,6 +17,8 @@ const EXPECTED: Array<[string, string, string, boolean, string | null, string | 
   ['birthday-verify-422-format', 'validation_error', 'invalid_request_error', true, null, 'birthday', null, null],
   ['broadcasting-auth-403', 'merchant_restricted', 'payment_error', false, null, null, null, null],
   ['cancel-400-not-cancellable', 'not_processable', 'invalid_request_error', false, null, null, null, null],
+  ['cancel-409-payment-in-progress', 'payment_in_progress', 'invalid_request_error', false, null, null, null, null],
+  ['cancel-409-payment-partly-paid', 'payment_partly_paid', 'invalid_request_error', false, null, null, null, null],
   ['client-session-422-sandbox', 'client_session_unavailable', 'invalid_request_error', false, null, 'request', null, null],
   ['client-session-422-security-check-failed', 'security_check_failed', 'invalid_request_error', true, null, 'request', null, null],
   ['client-session-complete-402', 'failed', 'payment_error', true, 'failed', null, null, null],

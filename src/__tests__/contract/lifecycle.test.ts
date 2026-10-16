@@ -293,6 +293,41 @@ describe('CN — cancel and dismiss', () => {
       api.restore();
     }
   });
+
+  it('CN-04 handles a cancel refused with 409', async () => {
+    // Refused because an attempt is under way, or because part of the payment was paid: never
+    // `cancelled`; the status read again says what the payment is.
+    const cases: Array<[string, Answer]> = [
+      ['cancel-409-payment-in-progress', 'status-processing'],
+      ['cancel-409-payment-partly-paid', { status: 200, body: { transaction: { reference: 'trx_PVrU8x2kQ1mNa7Lb3cDe', status: 'partial', error_code: null, payer_message: null } } }],
+    ];
+    for (const [refusal, status] of cases) {
+      // "Cancel payment": the payer stays, watching the payment under way.
+      const { events, options } = recorder();
+      const asked = await sheet({ 'POST /pay/cancel': refusal, 'GET /pay/status': status }, options);
+      await asked.controller.cancelPayment();
+      await settle();
+      expect([refusal, api.callsTo('GET /pay/status').length]).toEqual([refusal, 1]);
+      expect(asked.controller.closed).toBe(false);
+      expect(asked.controller.getSnapshot()).toMatchObject({ state: 'PENDING', cancelling: false });
+      expect(events.some((e) => e.startsWith('cancel'))).toBe(false);
+      asked.controller.hostGone();
+      api.restore();
+
+      // A dismiss: `processing`, the payment left as it is.
+      const closed = await sheet({ 'POST /pay/cancel': refusal, 'GET /pay/status': status });
+      closed.controller.dismiss();
+      await expect(closed.controller.result).resolves.toMatchObject({ status: 'processing', transaction: { id: 'trx_PVrU8x2kQ1mNa7Lb3cDe' } });
+      api.restore();
+    }
+
+    // Refused, then the status says it was paid meanwhile: the success.
+    const paid = await sheet({ 'POST /pay/cancel': 'cancel-409-payment-in-progress', 'GET /pay/status': 'status-succeeded' });
+    await paid.controller.cancelPayment();
+    await settle();
+    expect(paid.controller.getSnapshot().state).toBe('SUCCESS');
+    paid.controller.hostGone();
+  });
 });
 
 describe('CN — what may be cancelled', () => {

@@ -46,7 +46,7 @@
   during a payment it resolves `processing` and the payment keeps running; on the failure screen
   it resolves `failed` and cancels the payment when it still can be. **Cancel payment** is offered
   only while no payment is under way, and Pay, ✕ and **Cancel payment** are disabled while it
-  runs.
+  runs. A cancel Wajub refuses, for a payment being paid or partly paid, leaves it as it is.
 - A payment whose answer was lost on the network is never shown as failed: the sheet waits for its
   outcome, and offers the form again when the payment never started.
 - `WajubError` adds `http_status`, `block_reference` and `api_message`, `toJSON()` and

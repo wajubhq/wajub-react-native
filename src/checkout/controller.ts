@@ -148,6 +148,15 @@ const CARD_DIGIT_FIELDS: Record<string, RegExp> = {
   cvv: /^[0-9]{3,4}$/,
 };
 
+/**
+ * A cancel the API refused: 400 (not cancellable any more), or 409 — an
+ * attempt under way (`payment_in_progress`) or a payment partly paid
+ * (`payment_partly_paid`). The status then says what the payment is.
+ */
+function refusedCancel(e: unknown): boolean {
+  return e instanceof WajubError && (e.http_status === 400 || e.http_status === 409);
+}
+
 /** A payment that had ended when the session was read: its load error (README §4.2). */
 const TERMINAL_AT_LOAD: Record<string, string> = {
   failed: 'session_terminal_failed',
@@ -1571,7 +1580,7 @@ export class CheckoutController {
       const { redirect_url } = await this.client.cancel(this.token);
       this.settle(this.cancelled('payer_cancelled', redirect_url));
     } catch (e) {
-      if (e instanceof WajubError && e.http_status === 400) {
+      if (refusedCancel(e)) {
         await this.resolveRefusedCancel('payer_cancelled');
         return;
       }
@@ -1580,7 +1589,7 @@ export class CheckoutController {
     }
   }
 
-  /** A cancel answered 400: the payment already ended, or is under way. The status decides. */
+  /** A cancel refused (400, 409): the payment already ended, is under way or partly paid. The status decides. */
   private async resolveRefusedCancel(reason: 'payer_cancelled' | 'dismissed'): Promise<void> {
     let status = '';
     try {
@@ -1683,7 +1692,7 @@ export class CheckoutController {
     this.client.cancel(this.token).then(
       ({ redirect_url }) => this.settle(this.cancelled('dismissed', redirect_url)),
       (e: unknown) => {
-        if (e instanceof WajubError && e.http_status === 400) void this.resolveRefusedCancel('dismissed');
+        if (refusedCancel(e)) void this.resolveRefusedCancel('dismissed');
         else this.settle(this.cancelled('dismissed', null));
       },
     );

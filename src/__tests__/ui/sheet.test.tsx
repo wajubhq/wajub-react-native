@@ -340,6 +340,45 @@ describe('UI — payment sheet', () => {
     expect(screen.queryByTestId('wajub-phone-error')).toBeNull();
   });
 
+  it('CF-01 shows where the one-time code was sent, and only that', async () => {
+    const otp = async (answer: Answer) => {
+      const controller = await show(
+        { locale: 'en' },
+        routes({ 'GET /pay/sdk-config': 'sdk-config-card-kkiapay', 'POST /pay/process': answer }),
+      );
+      await waitFor(() => screen.getByTestId('wajub-method-card'));
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('wajub-method-card'));
+      });
+      await act(async () => {
+        fireEvent.changeText(screen.getByTestId('wajub-field-email'), 'awa.ngono@example.com');
+      });
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('wajub-pay'));
+      });
+      await waitFor(() => screen.getByTestId('wajub-step-screen-otp'));
+      return controller;
+    };
+
+    // The masked contact: "Code sent to …", never the provider's sentence.
+    const withContact = await otp('process-requires-otp');
+    expect(screen.getByTestId('wajub-step-hint').props.children).toBe('Code sent to +234******5678');
+    expect(screen.queryByText(body('process-requires-otp').message)).toBeNull();
+    expect(screen.getByTestId('wajub-step-code')).toBeTruthy();
+    await act(async () => withContact.hostGone());
+    screen.unmount();
+    api.restore();
+
+    // No contact named: the code prompt alone.
+    const bare = body('process-requires-otp');
+    bare.otp_masked_contact = '';
+    const withoutContact = await otp({ status: 202, body: bare });
+    expect(screen.queryByTestId('wajub-step-hint')).toBeNull();
+    expect(screen.queryByText(/sent to/i)).toBeNull();
+    expect(screen.getByTestId('wajub-step-code')).toBeTruthy();
+    await act(async () => withoutContact.hostGone());
+  });
+
   it('draws the Mobile Money form, detection and the approval screen', async () => {
     const controller = await show(
       { locale: 'fr' },

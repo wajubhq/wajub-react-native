@@ -219,7 +219,11 @@ export function StepView({ controller, snapshot, step }: Props & { step: StepScr
   return (
     <View style={{ gap: theme.gapRow }} testID={`wajub-step-screen-${step.kind}`}>
       <Txt variant="title">{t.steps[step.kind]}</Txt>
-      {secondary ? <Txt variant="hint">{secondary}</Txt> : null}
+      {secondary ? (
+        <Txt variant="hint" testID="wajub-step-hint">
+          {secondary}
+        </Txt>
+      ) : null}
       {step.error ? <Banner message={step.error} testID="wajub-step-error" /> : null}
       {step.kind === 'otp' ? field('code', t.code, { keyboardType: 'number-pad', maxLength: 10 }) : null}
       {step.kind === 'pin' ? field('pin', t.pin, { keyboardType: 'number-pad', maxLength: 6, secureTextEntry: true }) : null}
