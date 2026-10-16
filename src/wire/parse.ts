@@ -15,6 +15,9 @@ import type {
   ClientSession,
   EchoConfig,
   PaymentStatus,
+  PayerOtpInstructions,
+  PayerOtpRequest,
+  PayerOtpStep,
   ProcessingContext,
   SavedMethod,
   SdkChannelConfig,
@@ -149,13 +152,51 @@ export function parseTransaction(raw: unknown, strict = false): SessionTransacti
   return keep(t, transaction, ['customer', 'processing_context', 'error_code']);
 }
 
+/** The steps of each language, each with its `text` (and `template` when it has one). */
+function parsePayerOtpSteps(raw: unknown): Record<string, PayerOtpStep[]> {
+  const steps: Record<string, PayerOtpStep[]> = {};
+  for (const [lang, list] of Object.entries(obj(raw) ?? {})) {
+    steps[lang] = arr(list)
+      .map((entry) => {
+        const e = obj(entry);
+        const stepText = str(e?.text);
+        if (!e || stepText === undefined) return undefined;
+        const step: PayerOtpStep = { text: stepText };
+        const template = str(e.template);
+        if (template !== undefined) step.template = template;
+        return step;
+      })
+      .filter((s): s is PayerOtpStep => !!s);
+  }
+  return steps;
+}
+
+/** How the payer generates the code: a channel's announced one, or a charge's. */
+export function parsePayerOtp(raw: unknown): PayerOtpInstructions | undefined {
+  const p = obj(raw);
+  if (!p) return undefined;
+  const length = num(p.otp_length);
+  return keep(p, {
+    channel: str(p.channel) ?? '',
+    ussd_code: nullable(text(p.ussd_code)),
+    otp_length: length !== undefined && length > 0 ? Math.round(length) : null,
+    amount: str(p.amount) ?? '',
+    currency: str(p.currency) ?? '',
+    steps: parsePayerOtpSteps(p.steps),
+  });
+}
+
 function parseOperator(raw: unknown): ChannelOperator | undefined {
   const o = obj(raw);
   const operator = text(o?.operator);
   if (!o || !operator) return undefined;
   const operatorEntry: ChannelOperator = { slug: str(o.slug) ?? '', operator: operator.toLowerCase(), name: str(o.name) ?? operator, logo: nullable(text(o.logo)) };
   if ('logo_png' in o) operatorEntry.logo_png = nullable(text(o.logo_png));
-  return keep(o, operatorEntry);
+  const fee = num(o.fee_amount);
+  const total = num(o.amount_total);
+  if (fee !== undefined) operatorEntry.fee_amount = fee;
+  if (total !== undefined) operatorEntry.amount_total = total;
+  return keep(o, operatorEntry, ['fee_amount', 'amount_total']);
 }
 
 export function parseChannel(raw: unknown): SessionChannel | undefined {
@@ -179,6 +220,12 @@ export function parseChannel(raw: unknown): SessionChannel | undefined {
     channel.name_fr = nameFr;
   }
   if ('logo_png' in c) channel.logo_png = nullable(text(c.logo_png));
+  const fee = num(c.fee_amount);
+  const total = num(c.amount_total);
+  if (fee !== undefined) channel.fee_amount = fee;
+  if (total !== undefined) channel.amount_total = total;
+  const payerOtp = parsePayerOtp(c.payer_otp);
+  if (payerOtp && !c.operators) channel.payer_otp = payerOtp;
   const min = num(c.min_amount);
   const max = num(c.max_amount);
   if (min !== undefined) channel.min_amount = min;
@@ -187,7 +234,7 @@ export function parseChannel(raw: unknown): SessionChannel | undefined {
     .map(parseOperator)
     .filter((o): o is ChannelOperator => !!o);
   if (operators.length > 0) channel.operators = operators;
-  return keep(c, channel, ['name.fr', 'name_fr', 'min_amount', 'max_amount', 'operators', 'logo_png']);
+  return keep(c, channel, ['name.fr', 'name_fr', 'min_amount', 'max_amount', 'operators', 'logo_png', 'fee_amount', 'amount_total', 'payer_otp']);
 }
 
 function parseEcho(raw: unknown): EchoConfig | undefined {
@@ -370,6 +417,8 @@ export interface RawProcessBody {
   address_id?: string;
   address_instruction?: string;
   client_session?: ClientSession;
+  /** With `action: payer_otp`: how to get the code, why it is asked, the tries left. */
+  payer_otp?: PayerOtpRequest;
 }
 
 const PROCESS_STRINGS = [
@@ -422,7 +471,12 @@ export function parseProcess(raw: unknown): RawProcessBody {
   if (timeout !== undefined) body.three_ds_timeout = timeout;
   const clientSession = parseClientSession(b.client_session);
   if (clientSession) body.client_session = clientSession;
-  return keep(b, body, ['action', 'transaction', ...PROCESS_STRINGS, 'three_ds_timeout', 'client_session']);
+  const payerOtp = parsePayerOtp(b.payer_otp);
+  if (payerOtp) {
+    const reason = text(obj(b.payer_otp)?.reason);
+    body.payer_otp = { ...payerOtp, reason: reason ?? 'required', attempts_remaining: nullable(num(obj(b.payer_otp)?.attempts_remaining)) };
+  }
+  return keep(b, body, ['action', 'transaction', ...PROCESS_STRINGS, 'three_ds_timeout', 'client_session', 'payer_otp']);
 }
 
 /** POST /pay/{kind}/verify, HTTP 200. Anything but `success` is a failure. */

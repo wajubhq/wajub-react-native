@@ -16,7 +16,7 @@ afterEach(() => {
 const STATES: CheckoutState[] = [
   'INITIATED', 'COLLECTING_DETAILS', 'PROCESSING', 'OTP_REQUIRED', 'PIN_REQUIRED', 'PHONE_REQUIRED', 'BIRTHDAY_REQUIRED',
   'ADDRESS_REQUIRED', '3DS_REQUIRED', 'USSD_REQUIRED', 'APPROVAL_REQUIRED', 'VERIFYING', 'PENDING', 'SUCCESS', 'FAILED',
-  'EXPIRED', 'CANCELLED',
+  'EXPIRED', 'CANCELLED', 'PAYER_OTP_REQUIRED',
 ];
 
 /** Records every callback, in order. */
@@ -526,8 +526,21 @@ describe('ST — states, callbacks, results', () => {
       controller.hostGone();
       api.restore();
     }
+    // The code the payer generates in the operator's menu (2.2).
+    const { controller } = await sheet(
+      { 'GET /pay/session': 'session-payer-otp-announced', 'POST /pay/process': 'process-payer-otp-required', 'GET /pay/status': 'status-processing' },
+      { onStateChange: ({ state }) => seen.push(state) },
+    );
+    controller.chooseMethod('mobile_money');
+    const orange = operatorChoices(controller.getSnapshot().session!.channels, 'BF', 'en').find((c) => c.id === 'orange')!;
+    await controller.payMobileMoney({ phone: '70000000', country: 'BF', choice: orange, pickedByHand: false });
+    expect(controller.getSnapshot().state).toBe('PAYER_OTP_REQUIRED');
+    controller.hostGone();
+    api.restore();
     expect(seen.every((s) => STATES.includes(s as CheckoutState))).toBe(true);
-    expect(seen).toEqual(expect.arrayContaining(['INITIATED', 'COLLECTING_DETAILS', 'PROCESSING', 'APPROVAL_REQUIRED', 'OTP_REQUIRED', 'PENDING']));
+    expect(seen).toEqual(
+      expect.arrayContaining(['INITIATED', 'COLLECTING_DETAILS', 'PROCESSING', 'APPROVAL_REQUIRED', 'OTP_REQUIRED', 'PENDING', 'PAYER_OTP_REQUIRED']),
+    );
   });
 
   it('ST-02 fires callbacks in order', async () => {
@@ -629,6 +642,24 @@ describe('ST — states, callbacks, results', () => {
     const withFee = await fee.controller.result;
     expect(withFee).toMatchObject({ status: 'complete', payment: { amount: 10350, currency: 'XAF', method: 'mobile_money' } });
     expect(session.transaction.amount).toBe(10000);
+    api.restore();
+
+    // The fee follows the channel: the charge's total (10 450 on Orange), not the session's 10 200.
+    jest.useFakeTimers();
+    const perChannel = await sheet({
+      'GET /pay/session': 'session-payer-fee-per-channel',
+      'POST /pay/process': 'process-payer-fee-on-channel-sandbox',
+      'GET /pay/status': 'status-succeeded',
+    });
+    perChannel.controller.chooseMethod('mobile_money');
+    const orange = operatorChoices(perChannel.controller.getSnapshot().session!.channels, 'CM', 'en').find((c) => c.id === 'orange')!;
+    await perChannel.controller.payMobileMoney({ phone: '690000000', country: 'CM', choice: orange, pickedByHand: false });
+    await settle();
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(perChannel.controller.getSnapshot().screen.name).toBe('success');
+    perChannel.controller.dismiss();
+    await expect(perChannel.controller.result).resolves.toMatchObject({ status: 'complete', payment: { amount: 10450, currency: 'XAF', method: 'mobile_money' } });
+    expect(body('session-payer-fee-per-channel').transaction.amount_total).toBe(10200);
   });
 
   it('ST-07 survives throwing callbacks', async () => {

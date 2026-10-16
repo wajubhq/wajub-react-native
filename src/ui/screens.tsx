@@ -1,21 +1,24 @@
-import React, { useState } from 'react';
-import { ActivityIndicator, Linking, Pressable, Text, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import * as ReactNative from 'react-native';
+import { ActivityIndicator, Linking, Platform, Pressable, Text, View } from 'react-native';
 
-import type { CheckoutController, CheckoutSnapshot, StepScreen, ThreeDsScreen } from '../checkout/controller';
+import type { CheckoutController, CheckoutSnapshot, PayerOtpScreen, StepScreen, ThreeDsScreen } from '../checkout/controller';
 import type { MethodEntry } from '../checkout/methods';
 import { SANDBOX_CARD_FIELDS } from '../checkout/methods';
 import { StripeCardSection } from '../components/StripeCardSection';
+import { toAsciiDigits } from '../digits';
 import { formatAmount } from '../i18n';
-import type { PaymentSuccess } from '../types';
+import type { PayerOtpInstructions, PaymentSuccess } from '../types';
 import type { WajubError } from '../WajubError';
 import { Banner, Button, Field, OperatorLogo, StatusMark, Txt, useNow, weight } from './components';
 import { useSheet } from './theme';
 
 type Props = { controller: CheckoutController; snapshot: CheckoutSnapshot };
 
-function amountOf(snapshot: CheckoutSnapshot, lang: 'en' | 'fr'): string {
+/** What the payer pays: the selected method's total, or what was charged (README §5.3). */
+export function amountOf(snapshot: CheckoutSnapshot, lang: 'en' | 'fr'): string {
   const t = snapshot.session?.transaction;
-  return t ? formatAmount(t.amount_total ?? t.amount, t.currency, lang) : '';
+  return t ? formatAmount(snapshot.amountDue ?? t.amount_total ?? t.amount, t.currency, lang) : '';
 }
 
 /** Several methods, none chosen (INITIATED). Out-of-limit ones are shown disabled with their limit. */
@@ -156,7 +159,13 @@ export function WalletForm({ controller, snapshot, method }: Props & { method: E
 }
 
 /** A push sent to the phone (APPROVAL_REQUIRED), or a code to dial (USSD_REQUIRED). */
-export function WaitingOnPhone({ snapshot, phone, instruction, ussd }: Props & { phone: string | null; instruction: string | null; ussd: boolean }) {
+export function WaitingOnPhone({
+  snapshot,
+  phone,
+  instruction,
+  ussd,
+  codeReceived = false,
+}: Props & { phone: string | null; instruction: string | null; ussd: boolean; codeReceived?: boolean }) {
   const { theme, t, lang } = useSheet();
   const { colors } = theme;
   // The API's instruction is English: a French sheet keeps it under a label.
@@ -164,8 +173,8 @@ export function WaitingOnPhone({ snapshot, phone, instruction, ussd }: Props & {
   return (
     <View style={{ gap: theme.gapRow, alignItems: 'stretch' }} testID={ussd ? 'wajub-ussd' : 'wajub-approval'}>
       <StatusMark tone="neutral" glyph="📱" />
-      <Txt variant="title" style={{ textAlign: 'center' }}>
-        {ussd ? t.ussdTitle : t.approveTitle}
+      <Txt variant="title" style={{ textAlign: 'center' }} testID="wajub-approval-title">
+        {ussd ? t.ussdTitle : codeReceived ? t.payerOtp.approvalMessage : t.approveTitle}
       </Txt>
       <Txt variant="amount" style={{ textAlign: 'center' }}>
         {amountOf(snapshot, lang)}
@@ -243,6 +252,136 @@ export function StepView({ controller, snapshot, step }: Props & { step: StepScr
         : null}
       <Button testID="wajub-verify" title={snapshot.busy ? t.verifying : t.verify} onPress={submit} loading={snapshot.busy} />
       <ResendButton at={step.resendAt} busy={snapshot.busy} onPress={() => void controller.resendStep()} />
+    </View>
+  );
+}
+
+/** `tel:` with `#` as `%23`: Android's dialer opens with the code typed. */
+function dial(code: string): void {
+  void Linking.openURL(`tel:${code.replace(/#/g, '%23')}`).catch(() => undefined);
+}
+
+/** React Native's own clipboard, read only when Copy is pressed. */
+function copy(text: string): boolean {
+  try {
+    const clipboard = (ReactNative as { Clipboard?: { setString(value: string): void } }).Clipboard;
+    if (!clipboard) return false;
+    clipboard.setString(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The code to dial: a link to the dialer on Android (iOS takes no `*` or `#` in `tel:`), bold elsewhere. */
+function DialCode({ code, testID }: { code: string; testID?: string }) {
+  const { theme } = useSheet();
+  const style = { fontFamily: theme.fontFamily, fontWeight: weight(theme.fontWeightBold) };
+  if (Platform.OS === 'android') {
+    return (
+      <Text testID={testID} accessibilityRole="link" onPress={() => dial(code)} style={[style, { color: theme.colors.link, textDecorationLine: 'underline' }]}>
+        {code}
+      </Text>
+    );
+  }
+  return (
+    <Text testID={testID} style={[style, { color: theme.colors.text }]}>
+      {code}
+    </Text>
+  );
+}
+
+/** A step from its template (`{ussd_code}` as the dial code, `{amount}` in bold), else its plain text. */
+function PayerOtpStepText({ step, otp, index }: { step: { text: string; template?: string }; otp: PayerOtpInstructions; index: number }) {
+  const { theme } = useSheet();
+  const values: Record<string, string | null> = { ussd_code: otp.ussd_code, amount: otp.amount, currency: otp.currency };
+  const template = step.template;
+  const names = template ? [...template.matchAll(/\{([^{}]*)\}/g)].map((m) => m[1]) : [];
+  const usable = !!template && names.every((name) => name in values && !!values[name]);
+  const parts: React.ReactNode[] = [];
+  if (usable) {
+    template.split(/(\{[^{}]*\})/).forEach((part, i) => {
+      const name = /^\{([^{}]*)\}$/.exec(part)?.[1];
+      if (name === 'ussd_code') parts.push(<DialCode key={i} code={otp.ussd_code!} />);
+      else if (name === 'amount') parts.push(<Text key={i} style={{ fontWeight: weight(theme.fontWeightBold) }}>{otp.amount}</Text>);
+      else if (name) parts.push(values[name]);
+      else if (part) parts.push(part);
+    });
+  }
+  return (
+    <View style={{ flexDirection: 'row', gap: theme.spacingUnit * 2 }}>
+      <Txt>{`${index + 1}.`}</Txt>
+      <Txt style={{ flex: 1 }} testID={`wajub-payer-otp-step-${index}`}>
+        {usable ? parts : step.text}
+      </Txt>
+    </View>
+  );
+}
+
+/** PAYER_OTP_REQUIRED: the code the payer generates in the operator's menu (README §6.7). */
+export function PayerOtpView({ controller, snapshot, screen }: Props & { screen: PayerOtpScreen }) {
+  const { theme, t, lang } = useSheet();
+  const { colors } = theme;
+  const words = t.payerOtp;
+  const { otp } = screen;
+  const [code, setCode] = useState('');
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  const steps = otp.steps[lang] ?? otp.steps.en ?? otp.steps.fr ?? [];
+  const generic = steps.length === 0 ? words.genericSteps(`${otp.amount} ${otp.currency}`) : [];
+  const sandbox = snapshot.session?.transaction.sandbox === true;
+  const box = { backgroundColor: colors.surfaceMuted, borderRadius: theme.radius, padding: theme.spacingUnit * 3, gap: theme.spacingUnit };
+  return (
+    <View style={{ gap: theme.gapRow }} testID="wajub-payer-otp">
+      <Txt variant="title">{words.title}</Txt>
+      <Txt variant="hint">{words.description}</Txt>
+      {screen.error ? <Banner message={screen.error} testID="wajub-payer-otp-error" /> : null}
+      {screen.attemptsLeft !== null ? (
+        <Txt variant="hint" style={{ color: colors.danger }} testID="wajub-payer-otp-attempts">
+          {words.attemptsLeft(screen.attemptsLeft)}
+        </Txt>
+      ) : null}
+      {otp.ussd_code ? (
+        <View style={box}>
+          <Txt variant="label">{words.dial}</Txt>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: theme.spacingUnit * 2 }}>
+            <Txt variant="amount">
+              <DialCode code={otp.ussd_code} testID="wajub-payer-otp-dial" />
+            </Txt>
+            <Button variant="link" testID="wajub-payer-otp-copy" title={copied ? words.copied : words.copy} onPress={() => setCopied(copy(otp.ussd_code!))} />
+          </View>
+        </View>
+      ) : null}
+      <View style={box}>
+        <Txt variant="label">{words.amount}</Txt>
+        {/* Exactly as sent: the payer types it. */}
+        <Txt variant="amount" testID="wajub-payer-otp-amount">{`${otp.amount} ${otp.currency}`}</Txt>
+      </View>
+      <View style={{ gap: theme.spacingUnit * 2 }}>
+        <Txt variant="label">{words.stepsTitle}</Txt>
+        {steps.map((step, index) => (
+          <PayerOtpStepText key={index} step={step} otp={otp} index={index} />
+        ))}
+        {generic.map((text, index) => (
+          <PayerOtpStepText key={index} step={{ text }} otp={otp} index={index} />
+        ))}
+      </View>
+      {sandbox ? <Banner tone="warning" message={words.sandboxHint('123456')} testID="wajub-payer-otp-sandbox" /> : null}
+      <Field
+        testID="wajub-payer-otp-code"
+        label={words.codeLabel}
+        value={code}
+        onChangeText={(value) => setCode(toAsciiDigits(value).replace(/[^0-9]/g, ''))}
+        keyboardType="number-pad"
+        maxLength={otp.otp_length ?? 8}
+        error={snapshot.fieldErrors.code}
+      />
+      <Button testID="wajub-payer-otp-submit" title={words.submit} onPress={() => void controller.submitPayerOtp(code)} loading={snapshot.busy} />
+      <Button variant="link" testID="wajub-payer-otp-change" title={words.changeMethod} disabled={snapshot.busy} onPress={() => controller.leavePayerOtp()} />
     </View>
   );
 }

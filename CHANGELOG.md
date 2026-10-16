@@ -13,7 +13,7 @@
   forever. Called after that screen unmounted, it resolves `cancelled` (`host_gone`) at once. A
   second `present()` while a sheet is open is refused with `sheet_already_presented`; one called as
   the previous sheet closes opens, and React's StrictMode keeps the open sheet.
-- New callbacks: `onReady`, `onStateChange` (17 states), `onLoadError`, `onPaymentStarted`,
+- New callbacks: `onReady`, `onStateChange` (18 states), `onLoadError`, `onPaymentStarted`,
   `onRedirect`, `onSuccess`, `onError`, `onCancel`, `onComplete`. A callback that throws is logged
   and the sheet carries on.
 - The `appearance` option: presets `stripe`, `night`, `flat` and `none`, `variables`, top-level
@@ -42,6 +42,13 @@
   including a second step a provider asks for after the first; the sandbox 3-D Secure email code;
   provider pages in the system browser with **Continue payment**; **Try again** on the failure
   screen when the error allows it.
+- When the payer's fee depends on how they pay, the amount on **Pay**, in the summary and on the
+  approval screen follows the operator or method selected, and `PaymentSuccess.amount` is what was
+  charged.
+- Operators that take Mobile Money only with a code the payer generates in their menu get a
+  screen with the code to dial (a link to the dialer on Android, **Copy** everywhere), the exact
+  amount and the steps. It reports the new state `PAYER_OTP_REQUIRED`: a `switch` that lists every
+  `CheckoutState` needs that case.
 - Closing the sheet: before any attempt it cancels the payment (unless `cancelOnDismiss: false`);
   during a payment it resolves `processing` and the payment keeps running; on the failure screen
   it resolves `failed` and cancels the payment when it still can be. **Cancel payment** is offered

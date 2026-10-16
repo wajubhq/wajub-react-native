@@ -494,6 +494,29 @@ describe('PA — process answers', () => {
     await jest.advanceTimersByTimeAsync(30_000);
     expect(s.onPaymentStarted).toHaveBeenCalledTimes(1);
     s.controller.hostGone();
+    api.restore();
+
+    // A 202 asking for the payer's own code charged nothing: it fires once the code is accepted.
+    const code = await sheet({
+      'GET /pay/session': 'session-payer-otp-announced',
+      'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+      'POST /pay/process': ['process-payer-otp-required', 'process-payer-otp-accepted-sandbox'],
+    });
+    code.controller.chooseMethod('mobile_money');
+    const orange = operatorChoices(code.controller.getSnapshot().session!.channels, 'BF', 'en').find((c) => c.id === 'orange')!;
+    // The announced screen first, nothing sent; the first answer asks for the code again.
+    await code.controller.payMobileMoney({ phone: '70000000', country: 'BF', choice: orange, pickedByHand: false });
+    expect(code.onPaymentStarted).not.toHaveBeenCalled();
+    await code.controller.submitPayerOtp('123456');
+    await settle();
+    expect(code.controller.getSnapshot().state).toBe('PAYER_OTP_REQUIRED');
+    expect(code.onPaymentStarted).not.toHaveBeenCalled();
+    await code.controller.submitPayerOtp('123456');
+    await settle();
+    expect(code.controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    expect(code.onPaymentStarted).toHaveBeenCalledTimes(1);
+    expect(code.onPaymentStarted).toHaveBeenCalledWith({ method: 'mobile_money', channel: 'bf.orange' });
+    code.controller.hostGone();
   });
 });
 

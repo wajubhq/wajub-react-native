@@ -246,6 +246,12 @@ export const ERROR_CATALOGUE: Record<string, Entry> = {
     "Cette adresse n'a pas été acceptée. Encore {n} essais.",
   ),
   address_expired: form(STEP_EXPIRED.en, STEP_EXPIRED.fr),
+  otp_attempts_exceeded: {
+    type: 'payment_error',
+    retryable: true,
+    en: 'Your operator refused too many codes for this payment. Choose another payment method.',
+    fr: 'Votre opérateur a refusé trop de codes pour ce paiement. Choisissez un autre moyen de paiement.',
+  },
   max_attempts_exceeded: {
     type: 'payment_error',
     retryable: true,

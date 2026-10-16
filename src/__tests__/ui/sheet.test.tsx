@@ -1,5 +1,5 @@
 import React, { forwardRef, useEffect, useImperativeHandle } from 'react';
-import { AccessibilityInfo, Animated, Linking, StyleSheet, View } from 'react-native';
+import { AccessibilityInfo, Animated, Clipboard, Linking, Platform, StyleSheet, View } from 'react-native';
 import { act, configure, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { initStripe } from '@stripe/stripe-react-native';
 
@@ -8,6 +8,7 @@ import { PayClient } from '../../client/payClient';
 import { PaymentSheet, usePayment } from '../../usePayment';
 import { WajubSession } from '../../WajubSession';
 import { CheckoutSheet } from '../../ui/CheckoutSheet';
+import { formatAmount } from '../../i18n';
 import { body, fakeApi } from '../../test/fakeApi';
 import type { Answer, FakeApi } from '../../test/fakeApi';
 import type { CheckoutResult, PresentOptions } from '../../types';
@@ -79,6 +80,13 @@ async function show(options: Partial<PresentOptions> = {}, routeAnswers: Record<
     controller.start();
   });
   return controller;
+}
+
+/** The text a node draws, nested texts included. */
+function textOf(testID: string): string {
+  const flat = (node: ReturnType<typeof screen.getByTestId> | string): string =>
+    typeof node === 'string' ? node : node.children.map((child) => flat(child)).join('');
+  return flat(screen.getByTestId(testID));
 }
 
 function backgroundOf(testID: string): string {
@@ -407,6 +415,122 @@ describe('UI — payment sheet', () => {
     expect(screen.getByTestId('wajub-payer-instruction').props.children).toMatch(/dial \*126#/);
     expect(api.callsTo('POST /pay/process')[0].body.data).toMatchObject({ phone: '+237670000000', operator: 'mtn' });
     await act(async () => controller.hostGone());
+  });
+
+  it('CH-07 shows the selected operator\'s total on Pay and in the summary', async () => {
+    const controller = await show({ locale: 'en' }, routes({ 'GET /pay/session': 'session-payer-fee-per-channel' }));
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    const amount = () => screen.getByTestId('wajub-amount').props.children;
+    expect(amount()).toBe(formatAmount(10_200, 'XAF', 'en'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
+    });
+    expect(screen.getByText(`Pay ${formatAmount(10_200, 'XAF', 'en')}`)).toBeTruthy();
+    // An Orange number: 10 200 turns into 10 450, before Pay.
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-phone'), '690000000');
+    });
+    expect(amount()).toBe(formatAmount(10_450, 'XAF', 'en'));
+    expect(screen.getByText(`Pay ${formatAmount(10_450, 'XAF', 'en')}`)).toBeTruthy();
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-operator-mtn'));
+    });
+    expect(amount()).toBe(formatAmount(10_200, 'XAF', 'en'));
+    await act(async () => controller.hostGone());
+  });
+
+  it('MM-14 draws the code screen: dial link on Android, copy, exact amount, steps', async () => {
+    const open = async (os: 'ios' | 'android', session: Answer = 'session-payer-otp-announced') => {
+      jest.replaceProperty(Platform, 'OS', os);
+      const controller = await show(
+        { locale: 'en' },
+        routes({ 'GET /pay/session': session, 'POST /pay/process': 'process-payer-otp-accepted-sandbox' }),
+      );
+      await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
+      });
+      return controller;
+    };
+    const openURL = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+    // React Native's own clipboard says, once, that it moved out of core.
+    const warn = console.warn;
+    jest.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      if (!String(args[0]).startsWith('Clipboard has been extracted')) warn(...args);
+    });
+
+    const android = await open('android');
+    // The form says a code comes next, instead of the notification line.
+    expect(textOf('wajub-mobile-money-hint')).toBe('For this payment, you will generate a code by dialing *144*4*6#: the next step guides you.');
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-phone'), '70000000');
+    });
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-pay'));
+    });
+    await waitFor(() => screen.getByTestId('wajub-payer-otp'));
+    expect(api.callsTo('POST /pay/process')).toHaveLength(0);
+    expect(screen.getByText('Generate your payment code')).toBeTruthy();
+    // Android dials it: `#` as %23.
+    fireEvent.press(screen.getByTestId('wajub-payer-otp-dial'));
+    expect(openURL).toHaveBeenCalledWith('tel:*144*4*6%23');
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-payer-otp-copy'));
+    });
+    expect(Clipboard.setString).toHaveBeenCalledWith('*144*4*6#');
+    expect(screen.getByText('Copied')).toBeTruthy();
+    // The amount exactly as sent, the steps of the sheet's language from their templates, the sandbox code.
+    expect(textOf('wajub-payer-otp-amount')).toBe('1000 XOF');
+    expect(textOf('wajub-payer-otp-step-0')).toBe('On the phone of the Orange Money account, dial *144*4*6#.');
+    expect(textOf('wajub-payer-otp-step-1')).toBe('Enter the exact amount: 1000 XOF.');
+    expect(textOf('wajub-payer-otp-sandbox')).toBe('Test mode: enter the code 123456. Any other code is refused.');
+    // Digits only; checked here, never submitted on its own.
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-payer-otp-code'), '12a٣');
+    });
+    expect(screen.getByTestId('wajub-payer-otp-code').props.value).toBe('123');
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-payer-otp-submit'));
+    });
+    expect(screen.getByText('The code must have 6 digits.')).toBeTruthy();
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-payer-otp-code'), '123456');
+    });
+    expect(api.callsTo('POST /pay/process')).toHaveLength(0);
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-payer-otp-submit'));
+    });
+    await waitFor(() => screen.getByTestId('wajub-approval'));
+    expect(api.callsTo('POST /pay/process')[0].body.data).toMatchObject({ phone: '+22670000000', otp: '123456' });
+    expect(textOf('wajub-approval-title')).toBe('Code received. Your operator is processing the payment, this can take a moment.');
+    await act(async () => android.hostGone());
+    screen.unmount();
+    api.restore();
+    openURL.mockClear();
+
+    // iOS takes no `*` or `#` in `tel:`: the code in bold, Copy still there. No steps sent: the generic three.
+    const raw = body('session-payer-otp-announced');
+    raw.channels[0].payer_otp.steps = {};
+    const ios = await open('ios', { status: 200, body: raw });
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-phone'), '70000000');
+    });
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-pay'));
+    });
+    await waitFor(() => screen.getByTestId('wajub-payer-otp'));
+    expect(screen.getByTestId('wajub-payer-otp-dial').props.onPress).toBeUndefined();
+    fireEvent.press(screen.getByTestId('wajub-payer-otp-dial'));
+    expect(openURL).not.toHaveBeenCalled();
+    expect(screen.getByTestId('wajub-payer-otp-copy')).toBeTruthy();
+    expect(textOf('wajub-payer-otp-step-1')).toBe('Generate a payment code for the exact amount: 1000 XOF.');
+    expect(screen.queryByTestId('wajub-payer-otp-step-3')).toBeNull();
+    // "Use another payment method": the form again.
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-payer-otp-change'));
+    });
+    expect(screen.getByTestId('wajub-phone')).toBeTruthy();
+    await act(async () => ios.hostGone());
   });
 });
 

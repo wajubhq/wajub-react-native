@@ -414,6 +414,80 @@ describe('CH — channels', () => {
     expect(list.find((m) => m.kind === 'card')?.limit).toEqual({ max: 1_000 });
   });
 
+  it('CH-05 checks the limits against the channel\'s own total', () => {
+    // The payer's fee follows the channel: the card's 10 450 is over its 10 300, the payment's 10 200 is not.
+    const raw = body('session-payer-fee-per-channel');
+    const card = raw.channels.find((c: { slug: string }) => c.slug === 'card');
+    card.max_amount = 10_300;
+    card.amount_total = 10_450;
+    const config = parseSdkConfig(body('sdk-config-cm-stripe'));
+    expect(availableMethods(parseSession(raw), config, 'en', true).find((m) => m.kind === 'card')?.limit).toEqual({ max: 10_300 });
+    delete card.amount_total;
+    expect(availableMethods(parseSession(raw), config, 'en', true).find((m) => m.kind === 'card')?.limit).toBeNull();
+  });
+
+  it('CH-07 shows the amount of the selected operator, channel, or payment', async () => {
+    const { controller } = await load('session-payer-fee-per-channel');
+    const due = () => controller.getSnapshot().amountDue;
+    const session = controller.getSnapshot().session!;
+    expect(session.channels[0].operators?.map((o) => [o.operator, o.fee_amount, o.amount_total])).toEqual([
+      ['mtn', 200, 10_200],
+      ['orange', 450, 10_450],
+    ]);
+    // No method chosen: the payment's total.
+    expect(controller.getSnapshot().screen.name).toBe('methods');
+    expect(due()).toBe(10_200);
+    controller.chooseMethod('mobile_money');
+    expect(due()).toBe(10_200);
+    // It follows the selection live: an Orange number turns 10 200 into 10 450.
+    controller.selectMobileMoney('cm.mobile', 'mtn');
+    expect(due()).toBe(10_200);
+    controller.selectMobileMoney('cm.mobile', 'orange');
+    expect(due()).toBe(10_450);
+    controller.backToMethods();
+    expect(due()).toBe(10_200);
+    // The card channel's own total.
+    controller.chooseMethod('card');
+    expect(due()).toBe(10_200);
+    controller.hostGone();
+    api.restore();
+    const raw = body('session-payer-fee-per-channel');
+    raw.channels.find((c: { slug: string }) => c.slug === 'card').amount_total = 10_300;
+    const card = await load({ status: 200, body: raw });
+    card.controller.chooseMethod('card');
+    expect(card.controller.getSnapshot().amountDue).toBe(10_300);
+    card.controller.hostGone();
+    api.restore();
+
+    // The merchant bears the fee: the payment's total, whatever is selected.
+    const plain = await load('session-cm-aggregate');
+    plain.controller.chooseMethod('mobile_money');
+    const total = body('session-cm-aggregate').transaction.amount_total;
+    for (const operator of ['mtn', 'orange']) {
+      plain.controller.selectMobileMoney('cm.mobile', operator);
+      expect(plain.controller.getSnapshot().amountDue).toBe(total);
+    }
+    plain.controller.hostGone();
+  });
+
+  it('CH-07 shows what the charge took once a request is accepted', async () => {
+    jest.useFakeTimers();
+    const { controller } = await load('session-payer-fee-per-channel');
+    api.answer('POST /pay/process', 'process-payer-fee-on-channel-sandbox');
+    controller.chooseMethod('mobile_money');
+    const orange = operatorChoices(controller.getSnapshot().session!.channels, 'CM', 'en').find((c) => c.id === 'orange')!;
+    controller.selectMobileMoney(orange.channel, orange.id);
+    await controller.payMobileMoney({ phone: '690000000', country: 'CM', choice: orange, pickedByHand: false });
+    await settle();
+    // Nothing is sent back: the API prices the charge itself.
+    const sent = api.callsTo('POST /pay/process')[0].body;
+    const reference = body('process-payer-fee-on-channel-sandbox');
+    expect({ ...sent.data, _client: undefined }).toEqual({ phone: '+237690000000', country: 'CM', operator: 'orange', _client: undefined });
+    expect(controller.getSnapshot()).toMatchObject({ state: 'APPROVAL_REQUIRED', amountDue: reference.transaction.amount_total });
+    expect(reference.transaction.amount_total).toBe(10_450);
+    controller.hostGone();
+  });
+
   it('CH-05 does not open an only method that is out of its limits', async () => {
     const raw = body('session-cm-aggregate');
     raw.channels = [{ ...raw.channels[1], min_amount: 50_000 }];

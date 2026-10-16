@@ -11,6 +11,7 @@ import {
   LoadErrorView,
   MethodList,
   NoticeView,
+  PayerOtpView,
   PendingView,
   StepView,
   SuccessView,
@@ -75,7 +76,9 @@ function Content({ controller }: { controller: CheckoutController }) {
       );
     }
     case 'approval':
-      return <WaitingOnPhone {...props} phone={screen.phone} instruction={screen.instruction} ussd={false} />;
+      return <WaitingOnPhone {...props} phone={screen.phone} instruction={screen.instruction} ussd={false} codeReceived={screen.codeReceived} />;
+    case 'payer_otp':
+      return <PayerOtpView key={screen.round} {...props} screen={screen} />;
     case 'ussd':
       return <WaitingOnPhone {...props} phone={null} instruction={screen.instruction} ussd />;
     case 'step':
@@ -168,7 +171,7 @@ export function CheckoutSheet({ controller }: { controller: CheckoutController }
               {transaction && loaded ? (
                 <View style={{ backgroundColor: colors.surfaceMuted, borderRadius: theme.radius, padding: theme.spacingUnit * 3, marginBottom: theme.gapRow }}>
                   <Txt variant="amount" testID="wajub-amount">
-                    {formatAmount(transaction.amount_total ?? transaction.amount, transaction.currency, snapshot.lang)}
+                    {formatAmount(snapshot.amountDue ?? transaction.amount_total ?? transaction.amount, transaction.currency, snapshot.lang)}
                   </Txt>
                   {transaction.description ? <Txt variant="hint">{transaction.description}</Txt> : null}
                 </View>

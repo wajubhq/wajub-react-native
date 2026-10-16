@@ -34,6 +34,7 @@ const EXPECTED: Array<[string, string, string, boolean, string | null, string | 
   ['process-400-not-processable', 'not_processable', 'invalid_request_error', false, null, null, null, null],
   ['process-402-insufficient-funds-sandbox', 'insufficient_funds', 'payment_error', true, 'insufficient_funds', null, null, null],
   ['process-402-merchant-not-verified', 'merchant_not_verified', 'payment_error', false, 'merchant_not_verified', null, null, null],
+  ['process-402-payer-otp-attempts-exceeded', 'otp_attempts_exceeded', 'payment_error', true, 'otp_attempts_exceeded', null, null, null],
   ['process-403-restricted', 'payment_method_restricted', 'payment_error', true, null, null, null, null],
   ['process-403-shield-blocked', 'shield_blocked', 'payment_error', false, null, null, null, 'BLK-PLACEHOLDER'],
   ['process-409-order-not-validated', 'order_not_validated', 'invalid_request_error', false, null, null, null, null],

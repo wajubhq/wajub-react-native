@@ -62,6 +62,12 @@ export function MobileMoneyForm({
   const detected = detectOperator(phone, country, sandbox);
   const detectedChoice = choices.find((c) => c.id === detected);
   const selectedChoice = choices.find((c) => c.id === selected) ?? null;
+  // The amount the sheet shows follows the operator selected, picked or read from the number.
+  useEffect(() => {
+    controller.selectMobileMoney(selectedChoice?.channel ?? null, selectedChoice?.id ?? null);
+  }, [controller, selectedChoice?.channel, selectedChoice?.id]);
+  // A channel (never an aggregate) that announces the payer's own code says so before Pay.
+  const announced = selectedChoice ? session.channels.find((c) => c.slug === selectedChoice.channel && !c.operators?.length)?.payer_otp : undefined;
 
   // `operatorMode: "detect"`: no list until the number does not tell, or a
   // wallet held whatever the operator is on offer while it does.
@@ -83,7 +89,7 @@ export function MobileMoneyForm({
     setPhone(formatted);
     setSelected((current) => preselect(current, pickedByHand, formatted, country, choices, sandbox));
   };
-  const total = session.transaction.amount_total ?? session.transaction.amount;
+  const total = snapshot.amountDue ?? session.transaction.amount_total ?? session.transaction.amount;
 
   return (
     <View style={{ gap: theme.gapRow }}>
@@ -200,7 +206,11 @@ export function MobileMoneyForm({
         <Button variant="link" title={t.otherOperator} onPress={() => setListOpened(true)} testID="wajub-open-operators" />
       ) : null}
 
-      <Banner tone="info" message={t.mobileMoneyInstructions} />
+      <Banner
+        tone="info"
+        testID="wajub-mobile-money-hint"
+        message={announced ? (announced.ussd_code ? t.payerOtp.formHint(announced.ussd_code) : t.payerOtp.formHintGeneric) : t.mobileMoneyInstructions}
+      />
 
       <Button
         testID="wajub-pay"

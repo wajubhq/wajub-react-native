@@ -109,7 +109,7 @@ All optional, all called on the JavaScript thread, in this order: `onReady`, the
 | `onCancel` | `{ reason, redirectUrl }` | The sheet closes as `cancelled`. |
 | `onComplete` | `CheckoutResult` | The sheet closes: what `present()` resolves with. |
 
-States: `INITIATED` (method list), `COLLECTING_DETAILS` (a method's form), `PROCESSING` (Pay pressed), `APPROVAL_REQUIRED` (approve on the phone), `USSD_REQUIRED`, `OTP_REQUIRED`, `PIN_REQUIRED`, `PHONE_REQUIRED`, `BIRTHDAY_REQUIRED`, `ADDRESS_REQUIRED`, `3DS_REQUIRED`, `VERIFYING`, `PENDING` (waiting: a provider's page, or a confirmation), `SUCCESS`, `FAILED` ("Try again" when retryable), `EXPIRED`, `CANCELLED`.
+States: `INITIATED` (method list), `COLLECTING_DETAILS` (a method's form), `PROCESSING` (Pay pressed), `APPROVAL_REQUIRED` (approve on the phone), `USSD_REQUIRED`, `OTP_REQUIRED`, `PIN_REQUIRED`, `PHONE_REQUIRED`, `BIRTHDAY_REQUIRED`, `ADDRESS_REQUIRED`, `3DS_REQUIRED`, `PAYER_OTP_REQUIRED` (the code the payer generates in their operator's menu), `VERIFYING`, `PENDING` (waiting: a provider's page, or a confirmation), `SUCCESS`, `FAILED` ("Try again" when retryable), `EXPIRED`, `CANCELLED`.
 
 ## Results
 

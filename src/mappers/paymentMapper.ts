@@ -186,6 +186,8 @@ export function mapProcessOutcome(body: RawProcessResponse, methodType: string, 
   if ((action === 'redirect' || action === 'confirm' || action === 'confirm_3ds') && body.confirm_url) return requires(body.confirm_url);
   if (action === 'confirm_3ds' && body.three_ds_id) return requires(null, body.three_ds_id, body.masked_email ?? null);
   if (action === 'client_session' && body.client_session?.hosted_url) return requires(body.client_session.hosted_url);
+  // The payer's own code, to send again with `data.otp`: nothing was charged.
+  if (action === 'payer_otp' && body.payer_otp) return { ...(requires(null) as Extract<ProcessOutcome, { status: 'requires_action' }>), payerOtp: body.payer_otp };
   const step = STEP_FIELDS[action];
   if (step && body[step[0]]) return requires(null, body[step[0]] as string, (body[step[1]] as string | undefined) ?? null);
   return {

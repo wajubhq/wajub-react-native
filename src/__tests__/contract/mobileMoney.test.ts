@@ -19,7 +19,8 @@ import type { OperatorChoice } from '../../mobileMoney/form';
 import { makeController } from '../../test/checkout';
 import { body, fakeApi, fixture, settle } from '../../test/fakeApi';
 import type { Answer, FakeApi } from '../../test/fakeApi';
-import { parseSession } from '../../wire/parse';
+import { mapProcessOutcome } from '../../mappers/paymentMapper';
+import { parseProcess, parseSession } from '../../wire/parse';
 
 const vectors = JSON.parse(readFileSync(join(__dirname, '..', '..', '__fixtures__', 'mobile-money.vectors.json'), 'utf8'));
 
@@ -275,6 +276,178 @@ describe('MM — Mobile Money', () => {
       const source = readFileSync(file, 'utf8');
       expect([file, /#FFCC00|'\+237'|'\+225'|'677'|starts_with: \[/i.test(source)]).toEqual([file, false]);
     }
+  });
+});
+
+describe('MM — the payer\'s own code', () => {
+  /** A session whose bf.orange asks for the code only once charged. */
+  function asked(): Answer {
+    const raw = body('session-payer-otp-announced');
+    delete raw.channels[0].payer_otp;
+    return { status: 200, body: raw };
+  }
+
+  async function bf(session: Answer, process: Answer[], status: Answer | Answer[] = 'status-processing') {
+    api = fakeApi({
+      'GET /pay/session': session,
+      'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+      'POST /pay/process': process,
+      'POST /pay/cancel': 'cancel-200',
+      'GET /pay/status': status,
+    });
+    const callbacks = { onStateChange: jest.fn(), onError: jest.fn(), onPaymentStarted: jest.fn() };
+    const { controller } = makeController({ ...callbacks, locale: 'en' });
+    controller.start();
+    await settle();
+    controller.chooseMethod('mobile_money');
+    const orange = operatorChoices(controller.getSnapshot().session!.channels, 'BF', 'en').find((c) => c.id === 'orange')!;
+    const pay = async () => {
+      await controller.payMobileMoney({ phone: '70 00 00 00', country: 'BF', choice: orange, pickedByHand: false });
+      await settle();
+    };
+    return { controller, pay, ...callbacks };
+  }
+
+  const sent = (i: number) => api.callsTo('POST /pay/process')[i];
+  const reference = (name: string) => ({ ...(fixture(name).request!.body as { data: Record<string, unknown> }).data, _client: undefined });
+
+  it('MM-11 opens the code screen of an announced channel without calling the API', async () => {
+    const s = await bf('session-payer-otp-announced', ['process-payer-otp-accepted-sandbox']);
+    const announced = body('session-payer-otp-announced').channels[0].payer_otp;
+    expect(s.controller.getSnapshot().session!.channels[0].payer_otp).toEqual(announced);
+    await s.pay();
+    expect(api.callsTo('POST /pay/process')).toHaveLength(0);
+    expect(s.controller.getSnapshot()).toMatchObject({ state: 'PAYER_OTP_REQUIRED', screen: { name: 'payer_otp', otp: announced, error: null, attemptsLeft: null } });
+    expect(s.onPaymentStarted).not.toHaveBeenCalled();
+    // The local check: six digits, else nothing is sent.
+    await s.controller.submitPayerOtp('12');
+    expect(s.controller.getSnapshot().fieldErrors.code).toBe('The code must have 6 digits.');
+    expect(api.callsTo('POST /pay/process')).toHaveLength(0);
+    // The code goes with the first charge, typed on an Arabic-Indic keyboard or not.
+    await s.controller.submitPayerOtp('١٢٣٤٥٦');
+    await settle();
+    expect(api.callsTo('POST /pay/process')).toHaveLength(1);
+    expect(sent(0).body.channel).toBe('bf.orange');
+    expect({ ...sent(0).body.data, _client: undefined }).toEqual(reference('process-payer-otp-accepted-sandbox'));
+    expect(s.controller.getSnapshot()).toMatchObject({ state: 'APPROVAL_REQUIRED', screen: { name: 'approval', codeReceived: true } });
+    expect(s.onPaymentStarted).toHaveBeenCalledTimes(1);
+    s.controller.hostGone();
+  });
+
+  it('MM-11 says the code comes before Pay only for a channel that announces it', async () => {
+    // An aggregate's operator is never announced: the number, not the session, decides who is paid.
+    const raw = body('session-payer-otp-announced');
+    raw.channels[0].operators = [{ ...raw.channels[0], slug: 'bf.orange', operator: 'orange' }];
+    expect(parseSession(raw).channels[0].payer_otp).toBeUndefined();
+    expect(parseSession(body('session-payer-otp-announced')).channels[0].payer_otp?.ussd_code).toBe('*144*4*6#');
+  });
+
+  it('MM-12 asks for the code a charge needs, then sends it under a new key', async () => {
+    const s = await bf(asked(), ['process-payer-otp-required', 'process-payer-otp-accepted-sandbox']);
+    await s.pay();
+    expect({ ...sent(0).body.data, _client: undefined }).toEqual(reference('process-payer-otp-required'));
+    const asking = body('process-payer-otp-required').payer_otp;
+    expect(s.controller.getSnapshot()).toMatchObject({
+      state: 'PAYER_OTP_REQUIRED',
+      busy: false,
+      screen: { name: 'payer_otp', otp: { ussd_code: asking.ussd_code, otp_length: 6, amount: '1000', currency: 'XOF' }, error: null, attemptsLeft: null },
+    });
+    // Nothing was charged: no onPaymentStarted.
+    expect(s.onPaymentStarted).not.toHaveBeenCalled();
+    // WajubSession.submit() callers read the same request.
+    expect(mapProcessOutcome(parseProcess(body('process-payer-otp-required')), 'mobile_money')).toMatchObject({
+      status: 'requires_action',
+      payerOtp: { channel: 'bf.orange', otp_length: 6, amount: '1000', reason: 'required', attempts_remaining: 3 },
+    });
+    await s.controller.submitPayerOtp('123456');
+    await settle();
+    expect(sent(1).body.data).toMatchObject({ ...reference('process-payer-otp-accepted-sandbox'), _client: expect.any(Object) });
+    expect(sent(1).headers['Idempotency-Key']).not.toBe(sent(0).headers['Idempotency-Key']);
+    expect(s.controller.getSnapshot()).toMatchObject({ state: 'APPROVAL_REQUIRED', screen: { name: 'approval', codeReceived: true } });
+    expect(s.onPaymentStarted).toHaveBeenCalledTimes(1);
+    s.controller.hostGone();
+    api.restore();
+
+    // Closed on the code screen: as before any attempt, the payment is cancelled on Wajub too.
+    const left = await bf(asked(), ['process-payer-otp-required']);
+    await left.pay();
+    left.controller.dismiss();
+    await expect(left.controller.result).resolves.toMatchObject({ status: 'cancelled', reason: 'dismissed' });
+    expect(api.callsTo('POST /pay/cancel')).toHaveLength(1);
+  });
+
+  it('MM-13 shows the refusals on the code screen, and leaves for the form', async () => {
+    const s = await bf(asked(), ['process-payer-otp-required', 'process-payer-otp-invalid', 'process-payer-otp-refused', 'process-402-payer-otp-attempts-exceeded']);
+    await s.pay();
+    const round = (s.controller.getSnapshot().screen as { round: number }).round;
+    // A malformed code: the screen again, emptied, with the length; it does not count.
+    await s.controller.submitPayerOtp('123456');
+    await settle();
+    expect(s.controller.getSnapshot()).toMatchObject({
+      state: 'PAYER_OTP_REQUIRED',
+      screen: { name: 'payer_otp', error: 'The code must have 6 digits.', attemptsLeft: null, round: round + 1 },
+    });
+    // Refused by the operator: the tries left.
+    await s.controller.submitPayerOtp('654321');
+    await settle();
+    expect(s.controller.getSnapshot().screen).toMatchObject({
+      name: 'payer_otp',
+      error: 'Your operator did not accept this code. Generate a new one and try again.',
+      attemptsLeft: 2,
+    });
+    expect(sent(2).headers['Idempotency-Key']).not.toBe(sent(1).headers['Idempotency-Key']);
+    // Inline refusals are not onError.
+    expect(s.onError).not.toHaveBeenCalled();
+    // Too many codes refused: the form, with the error, payable on another channel.
+    await s.controller.submitPayerOtp('654323');
+    await settle();
+    expect(s.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', screen: { name: 'form' }, banner: { code: 'otp_attempts_exceeded' }, canCancel: true });
+    expect(s.controller.getSnapshot().banner?.message).toBe('Your operator refused too many codes for this payment. Choose another payment method.');
+    expect(s.onError).toHaveBeenCalledWith(expect.objectContaining({ code: 'otp_attempts_exceeded', type: 'payment_error', retryable: true }));
+    expect(s.onPaymentStarted).not.toHaveBeenCalled();
+    s.controller.hostGone();
+    api.restore();
+
+    // "Use another payment method": the Mobile Money form.
+    const back = await bf('session-payer-otp-announced', []);
+    await back.pay();
+    back.controller.leavePayerOtp();
+    expect(back.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', screen: { name: 'form', method: { kind: 'mobile_money' } } });
+    back.controller.hostGone();
+  });
+
+  it('MM-13 reads a code refused while watching', async () => {
+    jest.useFakeTimers();
+    const refused = body('status-pending-payer-otp-refused');
+    const exceeded = { status: 200, body: { ...refused, transaction: { ...refused.transaction, error_code: 'otp_attempts_exceeded' } } };
+    const s = await bf(
+      'session-payer-otp-announced',
+      ['process-payer-otp-accepted-sandbox'],
+      ['status-processing', 'status-pending-payer-otp-refused', 'status-processing', exceeded],
+    );
+    await s.pay();
+    await s.controller.submitPayerOtp('123456');
+    await settle();
+    expect(s.controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    await jest.advanceTimersByTimeAsync(5_000);
+    await jest.advanceTimersByTimeAsync(5_000);
+    // The operator refused the code later: the screen again, the count unknown.
+    expect(s.controller.getSnapshot()).toMatchObject({
+      state: 'PAYER_OTP_REQUIRED',
+      screen: { name: 'payer_otp', error: 'Your operator did not accept this code. Generate a new one and try again.', attemptsLeft: null },
+    });
+    expect(s.onError).not.toHaveBeenCalled();
+    const polls = api.callsTo('GET /pay/status').length;
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(api.callsTo('GET /pay/status')).toHaveLength(polls);
+    // Another code, then no more codes on this channel: the form.
+    await s.controller.submitPayerOtp('123456');
+    await settle();
+    await jest.advanceTimersByTimeAsync(5_000);
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(s.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', screen: { name: 'form' }, banner: { code: 'otp_attempts_exceeded' } });
+    expect(s.onError).toHaveBeenCalledWith(expect.objectContaining({ code: 'otp_attempts_exceeded' }));
+    s.controller.hostGone();
   });
 });
 

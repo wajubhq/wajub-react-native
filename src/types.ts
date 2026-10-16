@@ -190,6 +190,38 @@ export interface ChannelOperator {
   logo: string | null;
   /** The same logo as a PNG, where `logo` is an SVG; `null` or absent when there is none. */
   logo_png?: string | null;
+  /** The payer's fee on this operator, when the payer's fee follows the channel; the transaction's currency. */
+  fee_amount?: number;
+  /** What the payer pays on this operator: the amount and its fee. */
+  amount_total?: number;
+}
+
+/** One step to get the payer's own code: `text` as is, `template` with `{ussd_code}`, `{amount}`, `{currency}`. */
+export interface PayerOtpStep {
+  text: string;
+  template?: string;
+}
+
+/** How the payer generates, in the operator's menu, the code a payment on this channel needs. */
+export interface PayerOtpInstructions {
+  channel: string;
+  /** The code to dial; null when the operator's menu has none to show. */
+  ussd_code: string | null;
+  /** The code's exact number of digits; null: 4 to 8. */
+  otp_length: number | null;
+  /** The exact amount to type, as sent ("1000", "20.5"): never reformatted. */
+  amount: string;
+  currency: string;
+  /** The steps, per language (`en`, `fr`…). */
+  steps: Record<string, PayerOtpStep[]>;
+}
+
+/** A payment answer that asks for the payer's own code. */
+export interface PayerOtpRequest extends PayerOtpInstructions {
+  /** `required`: no code was sent; `invalid`: malformed, does not count; `refused`: the operator refused it. */
+  reason: string;
+  /** Codes the operator may still refuse on this channel for this payment; null when not known. */
+  attempts_remaining: number | null;
 }
 
 export interface SessionChannel {
@@ -212,6 +244,12 @@ export interface SessionChannel {
   currency: string;
   /** Aggregates only (`cm.mobile`): one entry per operator it folds. */
   operators?: ChannelOperator[];
+  /** The payer's fee on this channel, when the payer's fee follows the channel; on an aggregate only when its operators agree. */
+  fee_amount?: number;
+  /** What the payer pays on this channel: the amount and its fee. */
+  amount_total?: number;
+  /** Mobile Money: a payment here needs a code the payer generates in the operator's menu. */
+  payer_otp?: PayerOtpInstructions;
 }
 
 /** The payment's live status updates; the SDK uses them on its own. */
@@ -462,6 +500,8 @@ export type ProcessAction =
   | 'confirm_birthday'
   | 'confirm_address'
   | 'client_session'
+  /** A code the payer generates in the operator's menu; nothing was charged. */
+  | 'payer_otp'
   | (string & {});
 
 /**
@@ -483,6 +523,8 @@ export type ProcessOutcome =
       hint: string | null;
       clientSession: ClientSession | null;
       transaction: SessionTransaction | null;
+      /** `payer_otp`: how the payer gets the code, to send again with `data.otp`. */
+      payerOtp?: PayerOtpRequest;
     }
   | { status: 'failed'; error: WajubErrorShape; transaction: SessionTransaction | null };
 
@@ -520,7 +562,9 @@ export type CheckoutState =
   | 'SUCCESS'
   | 'FAILED'
   | 'EXPIRED'
-  | 'CANCELLED';
+  | 'CANCELLED'
+  /** The code the payer generates in the operator's menu. */
+  | 'PAYER_OTP_REQUIRED';
 
 /** A successful payment. Confirm it on your server before delivering. */
 export interface PaymentSuccess {
