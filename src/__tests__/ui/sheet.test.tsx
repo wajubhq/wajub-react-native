@@ -1,5 +1,5 @@
 import React, { forwardRef, useEffect, useImperativeHandle } from 'react';
-import { AccessibilityInfo, Animated, Clipboard, Linking, Platform, StyleSheet, View } from 'react-native';
+import { AccessibilityInfo, Animated, Clipboard, Linking, Platform, StyleSheet, TextInput, View } from 'react-native';
 import { act, configure, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { initStripe } from '@stripe/stripe-react-native';
 
@@ -8,6 +8,7 @@ import { PayClient } from '../../client/payClient';
 import { PaymentSheet, usePayment } from '../../usePayment';
 import { WajubSession } from '../../WajubSession';
 import { CheckoutSheet } from '../../ui/CheckoutSheet';
+import { typeInBox } from '../../ui/components';
 import { formatAmount } from '../../i18n';
 import { body, fakeApi } from '../../test/fakeApi';
 import type { Answer, FakeApi } from '../../test/fakeApi';
@@ -439,6 +440,20 @@ describe('UI — payment sheet', () => {
     await act(async () => controller.hostGone());
   });
 
+  it('MM-14 fills the code boxes as typed, replaced or pasted', () => {
+    const empty = ['', '', '', '', '', ''];
+    expect(typeInBox(empty, 0, '٧')).toEqual({ boxes: ['7', '', '', '', '', ''], focus: 1 });
+    // A digit typed into a full box, after or before the one there, replaces it.
+    expect(typeInBox(['7', '', '', '', '', ''], 0, '79')).toEqual({ boxes: ['9', '', '', '', '', ''], focus: 1 });
+    expect(typeInBox(['7', '', '', '', '', ''], 0, '97')).toEqual({ boxes: ['9', '', '', '', '', ''], focus: 1 });
+    // Part of a code pasted from a box on; a whole code from the first box; the last box keeps the focus.
+    expect(typeInBox(empty, 2, '123')).toEqual({ boxes: ['', '', '1', '2', '3', ''], focus: 5 });
+    expect(typeInBox(empty, 4, '12 34 56')).toEqual({ boxes: ['1', '2', '3', '4', '5', '6'], focus: 5 });
+    expect(typeInBox(empty, 5, '4')).toEqual({ boxes: ['', '', '', '', '', '4'], focus: 5 });
+    // Nothing but letters: the box empties.
+    expect(typeInBox(['7', '', '', '', '', ''], 0, 'x')).toEqual({ boxes: empty, focus: 0 });
+  });
+
   it('MM-14 draws the code screen: dial link on Android, copy, exact amount, steps', async () => {
     const open = async (os: 'ios' | 'android', session: Answer = 'session-payer-otp-announced') => {
       jest.replaceProperty(Platform, 'OS', os);
@@ -484,18 +499,38 @@ describe('UI — payment sheet', () => {
     expect(textOf('wajub-payer-otp-step-0')).toBe('On the phone of the Orange Money account, dial *144*4*6#.');
     expect(textOf('wajub-payer-otp-step-1')).toBe('Enter the exact amount: 1000 XOF.');
     expect(textOf('wajub-payer-otp-sandbox')).toBe('Test mode: enter the code 123456. Any other code is refused.');
-    // Digits only; checked here, never submitted on its own.
+    // One box per digit: digits of any script, the next box focused as one is typed, backspace back.
+    const box = (i: number) => screen.getByTestId(`wajub-payer-otp-code-${i}`);
+    const boxes = () => [0, 1, 2, 3, 4, 5].map((i) => box(i).props.value).join(',');
+    const focus = (TextInput.prototype as unknown as { focus: jest.Mock }).focus;
+    const focused = () => (focus.mock.contexts[focus.mock.contexts.length - 1] as { props: { testID: string } }).props.testID;
+    expect(screen.queryByTestId('wajub-payer-otp-code-6')).toBeNull();
     await act(async () => {
-      fireEvent.changeText(screen.getByTestId('wajub-payer-otp-code'), '12a٣');
+      fireEvent.changeText(box(0), '1');
     });
-    expect(screen.getByTestId('wajub-payer-otp-code').props.value).toBe('123');
+    expect(focused()).toBe('wajub-payer-otp-code-1');
+    await act(async () => {
+      fireEvent.changeText(box(1), '٢');
+    });
+    await act(async () => {
+      fireEvent.changeText(box(2), 'a');
+    });
+    expect(boxes()).toBe('1,2,,,,');
+    await act(async () => {
+      fireEvent(box(2), 'keyPress', { nativeEvent: { key: 'Backspace' } });
+    });
+    expect(boxes()).toBe('1,,,,,');
+    expect(focused()).toBe('wajub-payer-otp-code-1');
+    // Checked here, never submitted on its own.
     await act(async () => {
       fireEvent.press(screen.getByTestId('wajub-payer-otp-submit'));
     });
     expect(screen.getByText('The code must have 6 digits.')).toBeTruthy();
+    // A code pasted, or filled from the SMS, fills every box.
     await act(async () => {
-      fireEvent.changeText(screen.getByTestId('wajub-payer-otp-code'), '123456');
+      fireEvent.changeText(box(3), '١٢٣٤٥٦');
     });
+    expect(boxes()).toBe('1,2,3,4,5,6');
     expect(api.callsTo('POST /pay/process')).toHaveLength(0);
     await act(async () => {
       fireEvent.press(screen.getByTestId('wajub-payer-otp-submit'));
@@ -511,6 +546,7 @@ describe('UI — payment sheet', () => {
     // iOS takes no `*` or `#` in `tel:`: the code in bold, Copy still there. No steps sent: the generic three.
     const raw = body('session-payer-otp-announced');
     raw.channels[0].payer_otp.steps = {};
+    raw.channels[0].payer_otp.otp_length = null;
     const ios = await open('ios', { status: 200, body: raw });
     await act(async () => {
       fireEvent.changeText(screen.getByTestId('wajub-phone'), '70000000');
@@ -525,6 +561,16 @@ describe('UI — payment sheet', () => {
     expect(screen.getByTestId('wajub-payer-otp-copy')).toBeTruthy();
     expect(textOf('wajub-payer-otp-step-1')).toBe('Generate a payment code for the exact amount: 1000 XOF.');
     expect(screen.queryByTestId('wajub-payer-otp-step-3')).toBeNull();
+    // No length known: one field, digits only, 4 to 8.
+    expect(screen.queryByTestId('wajub-payer-otp-code-0')).toBeNull();
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-payer-otp-code'), '12a٣');
+    });
+    expect(screen.getByTestId('wajub-payer-otp-code').props).toMatchObject({ value: '123', maxLength: 8 });
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-payer-otp-submit'));
+    });
+    expect(screen.getByText('The code must have between 4 and 8 digits.')).toBeTruthy();
     // "Use another payment method": the form again.
     await act(async () => {
       fireEvent.press(screen.getByTestId('wajub-payer-otp-change'));

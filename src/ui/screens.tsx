@@ -10,7 +10,7 @@ import { toAsciiDigits } from '../digits';
 import { formatAmount } from '../i18n';
 import type { PayerOtpInstructions, PaymentSuccess } from '../types';
 import type { WajubError } from '../WajubError';
-import { Banner, Button, Field, OperatorLogo, StatusMark, Txt, useNow, weight } from './components';
+import { Banner, Button, CodeBoxes, Field, OperatorLogo, StatusMark, Txt, useNow, weight } from './components';
 import { useSheet } from './theme';
 
 type Props = { controller: CheckoutController; snapshot: CheckoutSnapshot };
@@ -371,15 +371,19 @@ export function PayerOtpView({ controller, snapshot, screen }: Props & { screen:
         ))}
       </View>
       {sandbox ? <Banner tone="warning" message={words.sandboxHint('123456')} testID="wajub-payer-otp-sandbox" /> : null}
-      <Field
-        testID="wajub-payer-otp-code"
-        label={words.codeLabel}
-        value={code}
-        onChangeText={(value) => setCode(toAsciiDigits(value).replace(/[^0-9]/g, ''))}
-        keyboardType="number-pad"
-        maxLength={otp.otp_length ?? 8}
-        error={snapshot.fieldErrors.code}
-      />
+      {otp.otp_length && otp.otp_length <= 8 ? (
+        <CodeBoxes testID="wajub-payer-otp-code" length={otp.otp_length} label={words.codeLabel} onChange={setCode} error={snapshot.fieldErrors.code} />
+      ) : (
+        <Field
+          testID="wajub-payer-otp-code"
+          label={words.codeLabel}
+          value={code}
+          onChangeText={(value) => setCode(toAsciiDigits(value).replace(/[^0-9]/g, ''))}
+          keyboardType="number-pad"
+          maxLength={otp.otp_length ?? 8}
+          error={snapshot.fieldErrors.code}
+        />
+      )}
       <Button testID="wajub-payer-otp-submit" title={words.submit} onPress={() => void controller.submitPayerOtp(code)} loading={snapshot.busy} />
       <Button variant="link" testID="wajub-payer-otp-change" title={words.changeMethod} disabled={snapshot.busy} onPress={() => controller.leavePayerOtp()} />
     </View>

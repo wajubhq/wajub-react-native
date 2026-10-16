@@ -3,6 +3,7 @@ import { ActivityIndicator, Animated, Image, Pressable, StyleSheet, Text, TextIn
 import type { KeyboardTypeOptions, StyleProp, TextStyle, ViewStyle } from 'react-native';
 
 import type { ResolvedTheme } from '../appearance/theme';
+import { toAsciiDigits } from '../digits';
 import { brandBadge } from '../mobileMoney/data';
 import { useSheet } from './theme';
 
@@ -211,6 +212,116 @@ export function Field({
             </Animated.Text>
           </View>
         ) : null}
+      </View>
+      {error ? (
+        <Txt variant="hint" style={{ color: colors.danger }} testID={testID ? `${testID}-error` : undefined}>
+          {error}
+        </Txt>
+      ) : null}
+    </View>
+  );
+}
+
+/**
+ * What typing `text` into box `index` makes of the boxes, and the box to focus
+ * next. Digits of any script are read as ASCII; one digit fills the box, a
+ * digit typed into a full box replaces it, a pasted (or autofilled) code fills
+ * the boxes from there — from the first when it is the whole code.
+ */
+export function typeInBox(boxes: readonly string[], index: number, text: string): { boxes: string[]; focus: number } {
+  const digits = toAsciiDigits(text).replace(/[^0-9]/g, '');
+  const next = [...boxes];
+  const last = boxes.length - 1;
+  if (!digits) {
+    next[index] = '';
+    return { boxes: next, focus: index };
+  }
+  const current = boxes[index];
+  if (digits.length === 2 && current && (digits.startsWith(current) || digits.endsWith(current))) {
+    next[index] = digits.startsWith(current) ? digits[1] : digits[0];
+    return { boxes: next, focus: Math.min(index + 1, last) };
+  }
+  const start = digits.length >= boxes.length ? 0 : index;
+  const spread = digits.slice(0, boxes.length - start);
+  for (let i = 0; i < spread.length; i++) next[start + i] = spread[i];
+  return { boxes: next, focus: Math.min(start + spread.length, last) };
+}
+
+/**
+ * One box per digit of a code: the next box takes the focus as a digit is
+ * typed, backspace in an empty box goes back, a pasted code fills them.
+ * Never submits on its own. `onChange` gets the digits, in order.
+ */
+export function CodeBoxes({
+  length,
+  label,
+  onChange,
+  error,
+  testID,
+}: {
+  length: number;
+  label: string;
+  onChange: (code: string) => void;
+  error?: string | null;
+  testID?: string;
+}) {
+  const { theme } = useSheet();
+  const { colors } = theme;
+  const [boxes, setBoxes] = useState<string[]>(() => Array.from({ length }, () => ''));
+  const [focused, setFocused] = useState<number | null>(null);
+  const inputs = useRef<Array<TextInput | null>>([]);
+  const set = (next: string[], focus: number) => {
+    setBoxes(next);
+    onChange(next.join(''));
+    inputs.current[focus]?.focus();
+  };
+  return (
+    <View style={{ gap: theme.spacingUnit * 1.5 }} testID={testID}>
+      <Txt variant="label">{label}</Txt>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: theme.spacingUnit * 2 }}>
+        {boxes.map((digit, index) => (
+          <TextInput
+            key={index}
+            ref={(input) => {
+              inputs.current[index] = input;
+            }}
+            testID={testID ? `${testID}-${index}` : undefined}
+            accessibilityLabel={`${label}, ${index + 1}/${length}`}
+            value={digit}
+            onChangeText={(text) => {
+              const typed = typeInBox(boxes, index, text);
+              set(typed.boxes, typed.focus);
+            }}
+            onKeyPress={({ nativeEvent }) => {
+              // Backspace in an empty box: the previous digit goes.
+              if (nativeEvent.key !== 'Backspace' || digit || index === 0) return;
+              const next = [...boxes];
+              next[index - 1] = '';
+              set(next, index - 1);
+            }}
+            keyboardType="number-pad"
+            // The code the operator sends by SMS, offered by the keyboard.
+            textContentType={index === 0 ? 'oneTimeCode' : undefined}
+            autoComplete={index === 0 ? 'sms-otp' : 'off'}
+            autoCorrect={false}
+            selectTextOnFocus
+            onFocus={() => setFocused(index)}
+            onBlur={() => setFocused((current) => (current === index ? null : current))}
+            style={{
+              width: 44,
+              height: 52,
+              textAlign: 'center',
+              borderRadius: theme.radius,
+              borderWidth: focused === index ? 2 : 1,
+              borderColor: error ? colors.dangerBorder : focused === index ? colors.focusRing : colors.inputBorder,
+              backgroundColor: colors.inputBackground,
+              color: colors.text,
+              fontSize: theme.fontSizeBase * 1.25,
+              fontFamily: theme.fontFamily,
+              fontWeight: weight(theme.fontWeightMedium),
+            }}
+          />
+        ))}
       </View>
       {error ? (
         <Txt variant="hint" style={{ color: colors.danger }} testID={testID ? `${testID}-error` : undefined}>
