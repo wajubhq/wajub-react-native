@@ -499,6 +499,100 @@ describe('UI — payment sheet', () => {
     await act(async () => controller.hostGone());
   });
 
+  it('MM-13 shows the payment\'s form on a sheet reopened on an approval', async () => {
+    const refused = body('status-pending-payer-otp-refused');
+    const exceeded = { status: 200, body: { ...refused, transaction: { ...refused.transaction, error_code: 'otp_attempts_exceeded' } } };
+    for (const status of ['status-pending-payer-otp-refused', exceeded] as Answer[]) {
+      jest.useFakeTimers();
+      try {
+        const controller = await show({ locale: 'en' }, routes({ 'GET /pay/session': 'session-processing-mobile-money', 'GET /pay/status': status }));
+        await waitFor(() => screen.getByTestId('wajub-approval'));
+        await act(async () => {
+          await jest.advanceTimersByTimeAsync(5_000);
+        });
+        // The country with its operators, as on a first opening: never "no operator available".
+        expect(screen.getByTestId('wajub-phone')).toBeTruthy();
+        expect(screen.getByTestId('wajub-operator-mtn')).toBeTruthy();
+        expect(screen.queryByTestId('wajub-no-operator')).toBeNull();
+        expect(screen.getByTestId('wajub-phone-label')).toBeTruthy();
+        if (status === exceeded) {
+          // The approval's channel refused too many codes: shown disabled, nothing left to pay with here.
+          expect(screen.getByTestId('wajub-operator-mtn').props.accessibilityState).toMatchObject({ disabled: true });
+          expect(screen.getByTestId('wajub-pay').props.accessibilityState).toMatchObject({ disabled: true });
+        } else {
+          expect(textOf('wajub-banner')).toBe('Your operator did not accept this code. Generate a new one and try again.');
+          expect(screen.getByTestId('wajub-operator-mtn').props.accessibilityState).toMatchObject({ selected: true, disabled: false });
+          expect(screen.getByTestId('wajub-pay').props.accessibilityState).toMatchObject({ disabled: false });
+        }
+        await act(async () => controller.hostGone());
+      } finally {
+        jest.useRealTimers();
+      }
+      screen.unmount();
+      api.restore();
+    }
+  });
+
+  it('MM-03 never selects a disabled operator', async () => {
+    // Orange's 10 450 is over cm.mobile's 10 300 (CH-05): an Orange number does not select it.
+    const limited = body('session-payer-fee-per-channel');
+    limited.channels[0].max_amount = 10_300;
+    const first = await show({ locale: 'en' }, routes({ 'GET /pay/session': { status: 200, body: limited } }));
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
+    });
+    expect(screen.getByTestId('wajub-operator-orange').props.accessibilityState).toMatchObject({ selected: false, disabled: true });
+    expect(textOf('wajub-operator-orange-unavailable')).toBe(`Maximum ${formatAmount(10_300, 'XAF', 'en')}`);
+    expect(screen.getByTestId('wajub-operator-mtn').props.accessibilityState).toMatchObject({ selected: true });
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-phone'), '690000000');
+    });
+    expect(screen.getByTestId('wajub-operator-orange').props.accessibilityState).toMatchObject({ selected: false });
+    expect(screen.getByTestId('wajub-operator-mtn').props.accessibilityState).toMatchObject({ selected: true });
+    await act(async () => first.hostGone());
+    screen.unmount();
+    api.restore();
+
+    // Burkina Faso with Orange (asking for the payer's code) and Moov: Orange exhausted, the selection moves to Moov.
+    const two = body('session-payer-otp-announced');
+    const moov = { ...two.channels[0], id: 'ch_bf_moov', slug: 'bf.moov', name: 'Moov Money', 'name.fr': 'Moov Money' };
+    delete moov.payer_otp;
+    two.channels.splice(1, 0, moov);
+    const second = await show(
+      { locale: 'en' },
+      routes({ 'GET /pay/session': { status: 200, body: two }, 'POST /pay/process': 'process-402-payer-otp-attempts-exceeded' }),
+    );
+    await waitFor(() => screen.getByTestId('wajub-method-mobile_money'));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-method-mobile_money'));
+    });
+    expect(screen.getByTestId('wajub-operator-orange').props.accessibilityState).toMatchObject({ selected: true });
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-phone'), '70000000');
+    });
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-pay'));
+    });
+    await waitFor(() => screen.getByTestId('wajub-payer-otp'));
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-payer-otp-code-0'), '654323');
+    });
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('wajub-payer-otp-submit'));
+    });
+    await waitFor(() => screen.getByTestId('wajub-phone'));
+    expect(screen.getByTestId('wajub-operator-orange').props.accessibilityState).toMatchObject({ selected: false, disabled: true });
+    expect(screen.getByTestId('wajub-operator-moov').props.accessibilityState).toMatchObject({ selected: true });
+    expect(screen.getByTestId('wajub-pay').props.accessibilityState).toMatchObject({ disabled: false });
+    // An Orange number typed now does not select it again.
+    await act(async () => {
+      fireEvent.changeText(screen.getByTestId('wajub-phone'), '70000000');
+    });
+    expect(screen.getByTestId('wajub-operator-moov').props.accessibilityState).toMatchObject({ selected: true });
+    await act(async () => second.hostGone());
+  });
+
   it('MM-13 falls back to the English steps and shows no amount when none is given', async () => {
     const open = async (payerOtp: Record<string, unknown>) => {
       const raw = body('session-payer-otp-announced');

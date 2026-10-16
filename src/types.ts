@@ -220,7 +220,7 @@ export interface PayerOtpInstructions {
 export interface PayerOtpRequest extends PayerOtpInstructions {
   /** `required`: no code was sent; `invalid`: malformed, does not count; `refused`: the operator refused it. */
   reason: string;
-  /** Codes the operator may still refuse on this channel for this payment (0 or less: none left); null when not known. */
+  /** Codes the operator may still refuse on this channel for this payment (0: none left); null when not known. */
   attempts_remaining: number | null;
 }
 

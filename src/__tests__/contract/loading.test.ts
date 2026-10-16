@@ -511,7 +511,10 @@ describe('CH — channels', () => {
 
   it('CH-07 shows the selection\'s amount again once an attempt ended', async () => {
     jest.useFakeTimers();
-    const { controller } = await load('session-payer-fee-per-channel');
+    // MTN's fee made 250 here: its 10 250, the payment's 10 200 and Orange's 10 450 all differ.
+    const raw = body('session-payer-fee-per-channel');
+    Object.assign(raw.channels[0].operators[0], { fee_amount: 250, amount_total: 10_250 });
+    const { controller } = await load({ status: 200, body: raw });
     api.answer('POST /pay/process', 'process-payer-fee-on-channel-sandbox');
     api.answer('GET /pay/status', ['status-processing', 'status-pending-attempt-refused']);
     controller.chooseMethod('mobile_money');
@@ -526,11 +529,49 @@ describe('CH — channels', () => {
     expect(controller.getSnapshot().state).toBe('FAILED');
     controller.tryAgain();
     expect(controller.getSnapshot().screen.name).toBe('form');
+    expect(controller.getSnapshot().amountDue).toBe(10_450);
     controller.selectMobileMoney('cm.mobile', 'mtn');
-    expect(controller.getSnapshot().amountDue).toBe(10_200);
+    expect(controller.getSnapshot().amountDue).toBe(10_250);
     // The method list: the payment's 10 200, not the 10 450 of the attempt that ended.
     controller.backToMethods();
     expect(controller.getSnapshot().amountDue).toBe(10_200);
+    controller.hostGone();
+  });
+
+  it('CH-07 shows the selection\'s amount again after a code step', async () => {
+    // The payer bears a fee that follows the channel: bf.orange 1 100, the card 1 050, the payment 1 000.
+    const raw = body('session-payer-otp-announced');
+    Object.assign(raw.transaction, { bearer: 'customer' });
+    Object.assign(raw.channels[0], { fee_amount: 100, amount_total: 1_100 });
+    Object.assign(raw.channels[1], { fee_amount: 50, amount_total: 1_050 });
+    // The refusal re-priced the payment at Orange's total.
+    const refused = body('process-payer-otp-refused');
+    Object.assign(refused.transaction, { bearer: 'customer', amount_total: 1_100 });
+    const { controller } = await load({ status: 200, body: raw }, 'sdk-config-cm-stripe', { locale: 'en' });
+    api.answer('POST /pay/process', { status: 202, body: refused });
+    const due = () => controller.getSnapshot().amountDue;
+    expect(due()).toBe(1_000);
+    controller.chooseMethod('mobile_money');
+    const orange = operatorChoices(controller.getSnapshot().session!.channels, 'BF', 'en').find((c) => c.id === 'orange')!;
+    controller.selectMobileMoney(orange.channel, orange.id);
+    expect(due()).toBe(1_100);
+    await controller.payMobileMoney({ phone: '70000000', country: 'BF', choice: orange, pickedByHand: false });
+    expect(controller.getSnapshot().state).toBe('PAYER_OTP_REQUIRED');
+    expect(due()).toBe(1_100);
+    await controller.submitPayerOtp('654321');
+    await settle();
+    expect(controller.getSnapshot().screen).toMatchObject({ name: 'payer_otp', attemptsLeft: 2 });
+    // "Use another payment method": the form, the selection's amount.
+    controller.leavePayerOtp();
+    expect(controller.getSnapshot().screen.name).toBe('form');
+    expect(due()).toBe(1_100);
+    controller.selectMobileMoney(null, null);
+    expect(due()).toBe(1_000);
+    // The list: the payment's 1 000, not the 1 100 the code step was priced at; the card its own.
+    controller.backToMethods();
+    expect(due()).toBe(1_000);
+    controller.chooseMethod('card');
+    expect(due()).toBe(1_050);
     controller.hostGone();
   });
 

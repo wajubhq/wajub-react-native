@@ -483,7 +483,9 @@ export function parseProcess(raw: unknown): RawProcessBody {
   const payerOtp = parsePayerOtp(b.payer_otp);
   if (payerOtp) {
     const reason = text(obj(b.payer_otp)?.reason);
-    body.payer_otp = { ...payerOtp, reason: reason ?? 'required', attempts_remaining: nullable(num(obj(b.payer_otp)?.attempts_remaining)) };
+    const left = num(obj(b.payer_otp)?.attempts_remaining);
+    // A negative count is none left.
+    body.payer_otp = { ...payerOtp, reason: reason ?? 'required', attempts_remaining: left === undefined ? null : Math.max(0, left) };
   }
   return keep(b, body, ['action', 'transaction', ...PROCESS_STRINGS, 'three_ds_timeout', 'client_session', 'payer_otp']);
 }

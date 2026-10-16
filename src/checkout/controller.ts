@@ -1604,7 +1604,9 @@ export class CheckoutController {
     this.inFlight = false;
     this.knownStatus = 'pending';
     this.attempt = null;
+    // The payment's Mobile Money form, as on a first opening: also on a sheet reopened on an approval.
     const method = this.snapshot.methods.find((m) => m.kind === 'mobile_money') ?? this.chosen;
+    if (method) this.chosen = method;
     this.show(method ? { name: 'form', method } : { name: 'methods' }, method ? 'COLLECTING_DETAILS' : 'INITIATED', { busy: false, banner, fieldErrors: {}, ...patch });
     if (banner && notify) this.emit('onError', banner);
   }
@@ -1612,9 +1614,24 @@ export class CheckoutController {
   /** Too many codes refused on the channel last paid with: not offered again for this payment. */
   private exhaust(error: WajubError, notify: boolean): void {
     const request = this.mobileMoneyRequest;
-    const key = request ? `${request.channel}:${request.operator}` : null;
+    // A sheet reopened on the approval sent no request: the payment's channel says which one.
+    const key = request ? `${request.channel}:${request.operator}` : this.choiceKeyOf(this.attempt?.channel);
     const exhausted = key && !this.snapshot.exhausted.includes(key) ? [...this.snapshot.exhausted, key] : this.snapshot.exhausted;
     this.backToMobileMoneyForm(error, notify, { exhausted });
+  }
+
+  /** The Mobile Money choice (`channel:operator`) a real channel slug is paid through: its own, or an aggregate's member. */
+  private choiceKeyOf(slug: string | undefined): string | null {
+    if (!slug) return null;
+    for (const channel of this.snapshot.session?.channels ?? []) {
+      if (channel.slug === slug && !channel.operators?.length) {
+        const parts = slug.toLowerCase().split('.');
+        return `${slug}:${parts.length >= 2 ? parts[1] : parts[0]}`;
+      }
+      const member = channel.operators?.find((o) => o.slug === slug);
+      if (member) return `${channel.slug}:${member.operator}`;
+    }
+    return null;
   }
 
   /** The refusal the last answer (else the request) already knew: not news (README §6.7). */

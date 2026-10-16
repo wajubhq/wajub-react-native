@@ -578,6 +578,9 @@ describe('MM — the payer\'s own code', () => {
   it('MM-13 keeps the tries left after the local check, and reads a negative count as none', async () => {
     const negative = body('process-payer-otp-refused');
     negative.payer_otp.attempts_remaining = -1;
+    // 0 wherever the SDK gives it out.
+    expect(parseProcess(negative).payer_otp?.attempts_remaining).toBe(0);
+    expect(mapProcessOutcome(parseProcess(negative), 'mobile_money')).toMatchObject({ payerOtp: { attempts_remaining: 0 } });
     const s = await bf(asked(), ['process-payer-otp-required', 'process-payer-otp-refused', { status: 202, body: negative }]);
     await s.pay();
     await s.controller.submitPayerOtp('654321');
@@ -590,8 +593,45 @@ describe('MM — the payer\'s own code', () => {
     await s.controller.submitPayerOtp('654322');
     await settle();
     const left = (s.controller.getSnapshot().screen as { attemptsLeft: number }).attemptsLeft;
+    expect(left).toBe(0);
     expect(sheetStrings('en').payerOtp.attemptsLeft(left)).toBe('No tries left.');
     s.controller.hostGone();
+  });
+
+  it('MM-13 builds the payment\'s form on a sheet reopened on an approval', async () => {
+    jest.useFakeTimers();
+    const refused = body('status-pending-payer-otp-refused');
+    const exceeded = { status: 200, body: { ...refused, transaction: { ...refused.transaction, error_code: 'otp_attempts_exceeded' } } };
+    for (const [status, code] of [
+      ['status-pending-payer-otp-refused', 'invalid_otp'],
+      [exceeded, 'otp_attempts_exceeded'],
+    ] as Array<[Answer, string]>) {
+      api = fakeApi({ 'GET /pay/session': 'session-processing-mobile-money', 'GET /pay/sdk-config': 'sdk-config-cm-stripe', 'GET /pay/status': status });
+      const onError = jest.fn();
+      const { controller } = makeController({ locale: 'en', onError });
+      controller.start();
+      await settle();
+      // Reopened on the approval: no form was ever built.
+      expect(controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+      await jest.advanceTimersByTimeAsync(5_000);
+      const snapshot = controller.getSnapshot();
+      expect(snapshot).toMatchObject({ state: 'COLLECTING_DETAILS', screen: { name: 'form', method: { kind: 'mobile_money' } } });
+      // The payment's country with its operators, as on a first opening.
+      const screen = snapshot.screen as Extract<typeof snapshot.screen, { name: 'form' }>;
+      const method = screen.method as Extract<typeof screen.method, { kind: 'mobile_money' }>;
+      expect(operatorChoices(method.channels, 'CM', 'en').map((c) => c.id)).toEqual(['mtn']);
+      expect(snapshot.amountDue).toBe(body('session-processing-mobile-money').transaction.amount_total);
+      if (code === 'invalid_otp') {
+        expect(snapshot.banner?.message).toBe(REFUSED);
+        expect(onError).not.toHaveBeenCalled();
+      } else {
+        // The channel the approval was on is not offered again.
+        expect(snapshot.exhausted).toEqual(['cm.mobile:mtn']);
+        expect(onError).toHaveBeenCalledWith(expect.objectContaining({ code: 'otp_attempts_exceeded' }));
+      }
+      controller.hostGone();
+      api.restore();
+    }
   });
 
   it('MM-13 keeps the code step through a security retry', async () => {
