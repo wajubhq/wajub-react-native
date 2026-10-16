@@ -187,6 +187,19 @@ export const ERROR_CATALOGUE: Record<string, Entry> = {
     en: 'This payment can no longer be processed.',
     fr: 'Ce paiement ne peut plus être traité.',
   },
+  payment_partly_paid: {
+    type: 'invalid_request_error',
+    retryable: false,
+    en: "Part of this payment has already been paid, so it can't be cancelled.",
+    fr: 'Une partie de ce paiement a déjà été réglée : il ne peut plus être annulé.',
+  },
+  /** `payment_in_progress` answering a cancel (its code stays `payment_in_progress`). */
+  payment_in_progress_on_cancel: {
+    type: 'invalid_request_error',
+    retryable: false,
+    en: "This payment is being paid and can't be cancelled now.",
+    fr: 'Ce paiement est en cours de règlement et ne peut pas être annulé maintenant.',
+  },
   order_not_validated: {
     type: 'invalid_request_error',
     retryable: false,

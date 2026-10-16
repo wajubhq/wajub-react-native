@@ -250,7 +250,7 @@ export class PayClient {
 
   /** Cancels the payment for good; `redirect_url` is where the merchant sends a cancelled payer. */
   async cancel(token: string, options: RequestOptions = {}): Promise<CancelResult> {
-    const answer = await this.send(token, { method: 'POST', path: '/pay/cancel', timeoutMs: TIMEOUTS.requestMs, retry: 'cancel' }, undefined, options);
+    const answer = await this.send(token, { method: 'POST', path: '/pay/cancel', timeoutMs: TIMEOUTS.requestMs, retry: 'cancel', phase: 'cancel' }, undefined, options);
     return parseCancel(answer.body);
   }
 

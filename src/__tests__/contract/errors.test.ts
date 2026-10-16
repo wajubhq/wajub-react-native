@@ -64,7 +64,7 @@ function mapped(name: string, lang: 'en' | 'fr' = 'en'): WajubError {
     status: f.http_status,
     body: f.body,
     headers: { get: (n: string) => Object.entries(headers).find(([k]) => k.toLowerCase() === n.toLowerCase())?.[1] ?? null },
-    phase: f.request?.path === '/pay/session' ? 'load' : 'payment',
+    phase: f.request?.path === '/pay/session' ? 'load' : f.request?.path === '/pay/cancel' ? 'cancel' : 'payment',
     lang,
   });
 }
@@ -124,6 +124,17 @@ describe('ER — errors', () => {
     expect(mapped('process-409-payment-in-progress', 'fr').message).toBe(ERROR_CATALOGUE.server_error.fr);
     expect(mapped('process-422-over-mobile-money-limit-sandbox', 'fr').message).toBe('Vérifiez les informations saisies.');
     expect(mapped('process-422-over-mobile-money-limit-sandbox').message).toBe(body('process-422-over-mobile-money-limit-sandbox').message);
+    // A cancel refused: its own words, `payment_in_progress` included — on a payment attempt
+    // that code keeps its reading above.
+    expect(mapped('cancel-409-payment-partly-paid').message).toBe("Part of this payment has already been paid, so it can't be cancelled.");
+    expect(mapped('cancel-409-payment-partly-paid', 'fr').message).toBe('Une partie de ce paiement a déjà été réglée : il ne peut plus être annulé.');
+    expect(mapped('cancel-409-payment-in-progress')).toMatchObject({
+      code: 'payment_in_progress',
+      type: 'invalid_request_error',
+      retryable: false,
+      message: "This payment is being paid and can't be cancelled now.",
+    });
+    expect(mapped('cancel-409-payment-in-progress').localized('fr').message).toBe('Ce paiement est en cours de règlement et ne peut pas être annulé maintenant.');
     // And the same error, shown in the other language.
     expect(mapped('process-failed-402').localized('fr').message).toBe('Fonds insuffisants.');
     const step = parseStepVerify(body('otp-verify-invalid'));

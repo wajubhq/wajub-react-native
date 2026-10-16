@@ -9,6 +9,8 @@ interface ErrorContext {
   apiMessage?: string | null;
   payerMessage?: string | null;
   vars?: Record<string, string | number | null | undefined>;
+  /** The catalogue entry the message comes from, when it is not the code's own. */
+  entry?: string;
 }
 
 /** Response headers, as `fetch` gives them. */
@@ -16,13 +18,13 @@ export interface HeaderReader {
   get(name: string): string | null;
 }
 
-export type ErrorPhase = 'load' | 'payment';
+export type ErrorPhase = 'load' | 'payment' | 'cancel';
 
 function messageFor(code: string, lang: Lang, ctx: ErrorContext): string {
   if (code === 'validation_error' && lang === 'en' && ctx.apiMessage) {
     return ctx.apiMessage;
   }
-  const catalogued = catalogueMessage(code, lang, ctx.vars);
+  const catalogued = catalogueMessage(ctx.entry ?? code, lang, ctx.vars);
   if (catalogued !== null) return catalogued;
   if (ctx.status === 402) return GENERIC_DECLINE[lang];
   if (lang === 'en') {
@@ -163,7 +165,9 @@ export class WajubError extends Error implements WajubErrorShape {
     const body = parseApiError(input.body);
     let code = body.error_code || body.error?.code || codeForStatus(status, input.phase ?? 'payment');
     if (status === 410) code = 'session_terminal_expired';
-    const entry = isCatalogued(code) ? ERROR_CATALOGUE[code] : undefined;
+    // `payment_in_progress` refusing a cancel says so; on a payment attempt it keeps its own reading.
+    const key = input.phase === 'cancel' && code === 'payment_in_progress' ? 'payment_in_progress_on_cancel' : code;
+    const entry = isCatalogued(key) ? ERROR_CATALOGUE[key] : undefined;
     const keys = Object.keys(body.errors);
     const details = keys.length > 0 ? Object.fromEntries(keys.map((k) => [k, body.errors[k][0] ?? ''])) : undefined;
     const retryAfter = body.retry_after ?? retryAfterHeader(headers);
@@ -172,6 +176,7 @@ export class WajubError extends Error implements WajubErrorShape {
       apiMessage: body.message,
       payerMessage: body.payer_message,
       vars: { seconds: retryAfter, block_reference: body.block_reference },
+      entry: key !== code ? key : undefined,
     };
     return new WajubError(
       {
