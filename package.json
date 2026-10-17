@@ -4,17 +4,13 @@
   "description": "Native Wajub checkout SDK for React Native — Mobile Money, cards, wallets, light and dark, no WebView.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
-  "react-native": "src/index.ts",
-  "source": "src/index.ts",
+  "react-native": "lib/index.js",
   "files": [
     "lib",
-    "src",
-    "!src/__fixtures__",
-    "!src/__tests__",
-    "!src/test"
+    "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "node -e \"require('fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "build": "node -e \"require('fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsc -p tsconfig.build.types.json && node scripts/prune-declarations.js",
     "test": "jest",
     "lint": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "npm run lint && npm test && npm run build",
@@ -25,12 +21,16 @@
   },
   "peerDependencies": {
     "@react-native-async-storage/async-storage": ">=1.17.0",
+    "@react-native-clipboard/clipboard": ">=1.11.0",
     "@react-native-community/netinfo": ">=11.0.0",
     "@stripe/stripe-react-native": ">=0.38.0",
     "react": ">=18",
     "react-native": ">=0.74"
   },
   "peerDependenciesMeta": {
+    "@react-native-clipboard/clipboard": {
+      "optional": true
+    },
     "@stripe/stripe-react-native": {
       "optional": true
     }

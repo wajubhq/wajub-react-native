@@ -16,6 +16,31 @@ describe('PayClient — Authorization header', () => {
   });
 });
 
+describe('PayClient — a cancel refused', () => {
+  it('carries the refusal for an app that cancels itself', async () => {
+    const v2 = new PayClient({ sleep: async () => undefined, errors: 'v2' });
+    const cases: Array<[string, string, string]> = [
+      ['cancel-409-payment-in-progress', 'payment_in_progress', "This payment is being paid and can't be cancelled now."],
+      ['cancel-409-payment-partly-paid', 'payment_partly_paid', "Part of this payment has already been paid, so it can't be cancelled."],
+    ];
+    for (const [fixture, code, message] of cases) {
+      const api = fakeApi({ 'POST /pay/cancel': fixture });
+      try {
+        await expect(v2.cancel('tok')).rejects.toMatchObject({ code, type: 'invalid_request_error', retryable: false, http_status: 409, message });
+      } finally {
+        api.restore();
+      }
+    }
+    // On a payment attempt, `payment_in_progress` keeps its own reading.
+    const api = fakeApi({ 'POST /pay/process': 'process-409-payment-in-progress' });
+    try {
+      await expect(v2.process('tok', 'cm.mtn', {})).rejects.not.toMatchObject({ message: "This payment is being paid and can't be cancelled now." });
+    } finally {
+      api.restore();
+    }
+  });
+});
+
 describe("PayClient — 1.4's errors for the 1.4 methods", () => {
   const instant = { sleep: async () => undefined };
 

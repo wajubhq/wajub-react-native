@@ -5,6 +5,7 @@
 import { HOSTED_CARD_FIELDS } from '../types';
 import type { HostedCardField, SdkChannelConfig, SdkConfig, SessionChannel, SessionData } from '../types';
 import { channelName, isMobileMoneyChannel } from '../mobileMoney/form';
+import { drawableLogo } from './logo';
 
 /**
  * `client_session`: the PSP's hosted page (Paystack, Flutterwave, Adyen).
@@ -64,18 +65,27 @@ export function cardFlavor(entry: SdkChannelConfig | undefined, sandbox: boolean
   return null;
 }
 
-/** A Mobile Money channel's sdk-config entry: its own, or an aggregate member's. */
+/**
+ * A Mobile Money channel's sdk-config entry, under the session's own slug
+ * (an aggregate has one beside its members'). With `operator`, the member's
+ * entry for that operator when there is one. An answer keyed by members only
+ * (an aggregate without its own entry) gives a member's.
+ */
 export function mobileMoneyConfig(channel: SessionChannel, config: SdkConfig | null, operator?: string): SdkChannelConfig | undefined {
   if (!config) return undefined;
-  if (channel.operators?.length) {
-    const members = operator ? channel.operators.filter((o) => o.operator === operator) : channel.operators;
-    return members.map((o) => config.channels[o.slug]).find((entry) => entry !== undefined);
+  const members = channel.operators ?? [];
+  if (operator) {
+    const picked = members.filter((o) => o.operator === operator).map((o) => config.channels[o.slug]).find((entry) => entry !== undefined);
+    if (picked) return picked;
   }
-  return config.channels[channel.slug];
+  const own = config.channels[channel.slug];
+  if (own) return own;
+  return members.map((o) => config.channels[o.slug]).find((entry) => entry !== undefined);
 }
 
-/** Hidden by sdk-config (`available: false`). Without an entry (sandbox, or no sdk-config) it is a phone form. */
+/** Hidden by sdk-config (`available: false`). Without an entry (no sdk-config, or none for it) it is a phone form. */
 function mobileMoneyHidden(channel: SessionChannel, config: SdkConfig | null): SessionChannel | null {
+  if (config?.channels[channel.slug]?.available === false) return null;
   if (!channel.operators?.length) {
     return mobileMoneyConfig(channel, config)?.available === false ? null : channel;
   }
@@ -83,7 +93,13 @@ function mobileMoneyHidden(channel: SessionChannel, config: SdkConfig | null): S
   return operators.length > 0 ? { ...channel, operators } : null;
 }
 
-function limitOf(channel: SessionChannel, amount: number): MethodLimit | null {
+/**
+ * The channel's limits against what the payer would pay there (README §5.3):
+ * the chosen operator's total, else the channel's, else the payment's.
+ */
+export function limitOf(channel: SessionChannel, transactionTotal: number, operator?: string | null): MethodLimit | null {
+  const member = operator ? channel.operators?.find((o) => o.operator === operator) : undefined;
+  const amount = member?.amount_total ?? channel.amount_total ?? transactionTotal;
   if (channel.min_amount !== undefined && channel.min_amount > amount) return { min: channel.min_amount };
   if (channel.max_amount !== undefined && channel.max_amount < amount) return { max: channel.max_amount };
   return null;
@@ -106,7 +122,7 @@ export function availableMethods(session: SessionData, config: SdkConfig | null,
       const shown = mobileMoneyHidden(channel, config);
       if (!shown) continue;
       if (!momo) {
-        momo = { kind: 'mobile_money', id: 'mobile_money', label: 'Mobile Money', logo: channel.logo ?? null, channels: [], slugs: [], limit: null };
+        momo = { kind: 'mobile_money', id: 'mobile_money', label: 'Mobile Money', logo: drawableLogo(channel.logo, channel.logo_png), channels: [], slugs: [], limit: null };
         methods.push(momo);
       }
       momo.slugs.push(channel.slug);
@@ -123,7 +139,7 @@ export function availableMethods(session: SessionData, config: SdkConfig | null,
         kind: 'card',
         id: 'card',
         label: channelName(channel, lang),
-        logo: channel.logo ?? null,
+        logo: drawableLogo(channel.logo, channel.logo_png),
         slug: channel.slug,
         flavor,
         fields:
@@ -142,7 +158,7 @@ export function availableMethods(session: SessionData, config: SdkConfig | null,
         kind: 'wallet',
         id: channel.slug,
         label: channelName(channel, lang),
-        logo: channel.logo ?? null,
+        logo: drawableLogo(channel.logo, channel.logo_png),
         slug: channel.slug,
         limit: limitOf(channel, amount),
       });

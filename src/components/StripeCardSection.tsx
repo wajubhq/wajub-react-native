@@ -45,9 +45,8 @@ export interface StripeCardSectionProps {
   /** The Pay button's label; "Pay with card" when absent. */
   payLabel?: string;
   /**
-   * The payment's Stripe key (sdk-config `publishable_key`): only the account
-   * that issues a `pm_…` can charge it. When given, Stripe is initialised with
-   * it while this section shows.
+   * The card method's `publishable_key`. When given, Stripe is initialised
+   * with it while this section shows.
    */
   publishableKey?: string | null;
   /** The app's own Stripe key: put back when this section goes away. */
@@ -59,11 +58,10 @@ export interface StripeCardSectionProps {
 }
 
 /**
- * Native Stripe card fields. Given `publishableKey` (the payment's, from
- * sdk-config — what the sheet passes), it initialises Stripe with it while it
- * shows, so no `StripeProvider` is needed; without one, the app must have
- * initialised Stripe with that key itself. Drawn with the payment sheet's
- * theme inside it, the default light one elsewhere.
+ * Stripe's native card fields. Given `publishableKey`, no `StripeProvider` is
+ * needed; without it, the app must have initialised Stripe with the card
+ * method's key. Drawn with the payment sheet's look inside it, the default
+ * light one elsewhere.
  */
 export function StripeCardSection({
   cardholderName,

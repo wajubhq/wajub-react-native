@@ -17,7 +17,7 @@ export interface WajubProviderProps {
   children: React.ReactNode;
 }
 
-/** Optional root provider — sessions are created per payment via [usePayment]. */
+/** Optional: `usePayment()` works without it. */
 export function WajubProvider({ children }: WajubProviderProps) {
   const value = useMemo<WajubContextValue>(
     () => ({
@@ -153,7 +153,7 @@ const legacyOwners = new Map<CheckoutController, { owner: symbol; callbacks: Rea
 
 /**
  * @deprecated The 1.4 component, kept for code that renders it directly:
- * use `usePayment()`. It draws the v2 sheet and reports in 1.4's terms:
+ * use `usePayment()`. It draws the payment sheet and reports in 1.4's terms:
  * `onSubmit` as the payer pays, `onResult` with the outcome (`processing` when
  * the sheet closes during an attempt), `onDismiss` when it closes before one.
  * Made visible while another sheet is open, it opens once that one closes.

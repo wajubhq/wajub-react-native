@@ -1,7 +1,6 @@
 /**
- * The sheet's look (spec appearance.md): the same `Appearance` object as
- * Wajub.js, the merchant's branding under it, the web checkout's palettes
- * under that.
+ * The sheet's look: the `appearance` option, the merchant's branding under
+ * it, the default palettes under that.
  */
 import type {
   Appearance,
@@ -13,7 +12,7 @@ import type {
 } from '../types';
 import { contrast, mix, parseColor, readableOn } from './color';
 
-/** The web checkout's tokens (checkout.wajub src/styles/tokens.css), both schemes. */
+/** The sheet's default colours, light and dark. */
 export const DEFAULT_PALETTES: { light: ThemeTokens; dark: ThemeTokens } = {
   light: {
     primary: '#2563EB',
@@ -69,7 +68,7 @@ export const DEFAULT_PALETTES: { light: ThemeTokens; dark: ThemeTokens } = {
   },
 };
 
-/** Wajub.js's presets (appearance.js), identical values. */
+/** The appearance presets: `stripe`, `night`, `flat`, `none`. */
 export const THEME_PRESETS: Record<AppearanceThemePreset, Partial<Appearance>> = {
   stripe: {
     primaryColor: '#0570de',
@@ -185,8 +184,8 @@ export function parseFontFamily(value: unknown): string | undefined {
 }
 
 /**
- * Keeps the keys Wajub.js knows with values that parse; drops everything
- * else (`rules`, named colours, negative lengths…) without an error.
+ * Keeps the known keys with values that parse; drops everything else
+ * (`rules`, named colours, negative lengths…) without an error.
  */
 export function parseAppearance(input: unknown): Appearance {
   const source = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};

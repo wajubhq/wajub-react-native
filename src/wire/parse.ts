@@ -10,17 +10,20 @@
  * carry the values read here, and one it reads as absent or unusable is left out.
  */
 import type {
-  AltchaChallenge,
   Branding,
   ChannelOperator,
   ClientSession,
   EchoConfig,
   PaymentStatus,
+  PayerOtpInstructions,
+  PayerOtpRequest,
+  PayerOtpStep,
   ProcessingContext,
   SavedMethod,
   SdkChannelConfig,
   SdkConfig,
   SdkFlavor,
+  SecurityChallenge,
   SessionChannel,
   SessionData,
   SessionTransaction,
@@ -140,18 +143,69 @@ export function parseTransaction(raw: unknown, strict = false): SessionTransacti
     updated_at: nullable(text(t.updated_at)),
     terminal_at: nullable(text(t.terminal_at)),
   };
+  // The refusal left on a payment back at `pending` (null: none). Absent from older answers: unknown.
+  if ('error_code' in t) transaction.error_code = nullable(text(t.error_code));
   if (customer === null) transaction.customer = null;
   else if (customer) transaction.customer = keep(customer, { name: nullable(str(customer.name)), email: nullable(str(customer.email)) });
   const context = parseProcessingContext(t.processing_context);
   if (context) transaction.processing_context = context;
-  return keep(t, transaction, ['customer', 'processing_context']);
+  return keep(t, transaction, ['customer', 'processing_context', 'error_code']);
+}
+
+/**
+ * The steps of each language, each with its `text` (and `template` when it
+ * has one); a step given as a plain string is its text. A language with no
+ * step is left out, so the next one applies.
+ */
+function parsePayerOtpSteps(raw: unknown): Record<string, PayerOtpStep[]> {
+  const steps: Record<string, PayerOtpStep[]> = {};
+  for (const [lang, list] of Object.entries(obj(raw) ?? {})) {
+    const parsed = arr(list)
+      .map((entry) => {
+        if (typeof entry === 'string') return entry.trim() ? { text: entry } : undefined;
+        const e = obj(entry);
+        const stepText = str(e?.text);
+        if (!e || stepText === undefined) return undefined;
+        const step: PayerOtpStep = { text: stepText };
+        const template = str(e.template);
+        if (template !== undefined) step.template = template;
+        return step;
+      })
+      .filter((s): s is PayerOtpStep => !!s);
+    if (parsed.length > 0) steps[lang] = parsed;
+  }
+  return steps;
+}
+
+/** How the payer generates the code: a channel's announced one, or a charge's. */
+export function parsePayerOtp(raw: unknown): PayerOtpInstructions | undefined {
+  const p = obj(raw);
+  if (!p) return undefined;
+  const length = num(p.otp_length);
+  // Typed as sent; a number is read as it is written.
+  const amount = typeof p.amount === 'number' && Number.isFinite(p.amount) ? String(p.amount) : (str(p.amount) ?? '').trim();
+  return keep(p, {
+    channel: str(p.channel) ?? '',
+    ussd_code: nullable(text(p.ussd_code)),
+    // 1 to 12 digits; anything else is no length known.
+    otp_length: length !== undefined && Number.isInteger(length) && length >= 1 && length <= 12 ? length : null,
+    amount,
+    currency: str(p.currency) ?? '',
+    steps: parsePayerOtpSteps(p.steps),
+  });
 }
 
 function parseOperator(raw: unknown): ChannelOperator | undefined {
   const o = obj(raw);
   const operator = text(o?.operator);
   if (!o || !operator) return undefined;
-  return keep(o, { slug: str(o.slug) ?? '', operator: operator.toLowerCase(), name: str(o.name) ?? operator, logo: nullable(text(o.logo)) });
+  const operatorEntry: ChannelOperator = { slug: str(o.slug) ?? '', operator: operator.toLowerCase(), name: str(o.name) ?? operator, logo: nullable(text(o.logo)) };
+  if ('logo_png' in o) operatorEntry.logo_png = nullable(text(o.logo_png));
+  const fee = num(o.fee_amount);
+  const total = num(o.amount_total);
+  if (fee !== undefined) operatorEntry.fee_amount = fee;
+  if (total !== undefined) operatorEntry.amount_total = total;
+  return keep(o, operatorEntry, ['fee_amount', 'amount_total']);
 }
 
 export function parseChannel(raw: unknown): SessionChannel | undefined {
@@ -174,6 +228,13 @@ export function parseChannel(raw: unknown): SessionChannel | undefined {
     channel['name.fr'] = nameFr;
     channel.name_fr = nameFr;
   }
+  if ('logo_png' in c) channel.logo_png = nullable(text(c.logo_png));
+  const fee = num(c.fee_amount);
+  const total = num(c.amount_total);
+  if (fee !== undefined) channel.fee_amount = fee;
+  if (total !== undefined) channel.amount_total = total;
+  const payerOtp = parsePayerOtp(c.payer_otp);
+  if (payerOtp && !c.operators) channel.payer_otp = payerOtp;
   const min = num(c.min_amount);
   const max = num(c.max_amount);
   if (min !== undefined) channel.min_amount = min;
@@ -182,7 +243,7 @@ export function parseChannel(raw: unknown): SessionChannel | undefined {
     .map(parseOperator)
     .filter((o): o is ChannelOperator => !!o);
   if (operators.length > 0) channel.operators = operators;
-  return keep(c, channel, ['name.fr', 'name_fr', 'min_amount', 'max_amount', 'operators']);
+  return keep(c, channel, ['name.fr', 'name_fr', 'min_amount', 'max_amount', 'operators', 'logo_png', 'fee_amount', 'amount_total', 'payer_otp']);
 }
 
 function parseEcho(raw: unknown): EchoConfig | undefined {
@@ -230,7 +291,7 @@ function parseBranding(raw: unknown): Branding {
   return branding;
 }
 
-function parseAltcha(raw: unknown): AltchaChallenge | null {
+function parseAltcha(raw: unknown): SecurityChallenge | null {
   const a = obj(raw);
   const challenge = text(a?.challenge);
   if (!a || !challenge) return null;
@@ -275,7 +336,7 @@ export function parseSession(raw: unknown): SessionData {
       .map(parseChannel)
       .filter((c): c is SessionChannel => !!c),
     parsedBranding: parseBranding(body.branding),
-    altcha: parseAltcha(body.altcha),
+    securityChallenge: parseAltcha(body.altcha),
     return_url: nullable(text(body.return_url)),
     cancel_url: nullable(text(body.cancel_url)),
     geo_country: nullable(text(body.geo_country)?.toUpperCase()),
@@ -294,7 +355,7 @@ export function parseSession(raw: unknown): SessionData {
   if (Array.isArray(body.saved_methods)) {
     session.saved_methods = body.saved_methods.map(parseSavedMethod).filter((m): m is SavedMethod => !!m);
   }
-  return keep(body, session, ['locale', 'branding', 'echo', 'features', 'saved_methods']);
+  return keep(body, session, ['locale', 'branding', 'echo', 'features', 'saved_methods', 'altcha']);
 }
 
 /** GET /pay/sdk-config. */
@@ -365,6 +426,8 @@ export interface RawProcessBody {
   address_id?: string;
   address_instruction?: string;
   client_session?: ClientSession;
+  /** With `action: payer_otp`: how to get the code, why it is asked, the tries left. */
+  payer_otp?: PayerOtpRequest;
 }
 
 const PROCESS_STRINGS = [
@@ -417,14 +480,24 @@ export function parseProcess(raw: unknown): RawProcessBody {
   if (timeout !== undefined) body.three_ds_timeout = timeout;
   const clientSession = parseClientSession(b.client_session);
   if (clientSession) body.client_session = clientSession;
-  return keep(b, body, ['action', 'transaction', ...PROCESS_STRINGS, 'three_ds_timeout', 'client_session']);
+  const payerOtp = parsePayerOtp(b.payer_otp);
+  if (payerOtp) {
+    const reason = text(obj(b.payer_otp)?.reason);
+    const left = num(obj(b.payer_otp)?.attempts_remaining);
+    // A negative count is none left.
+    body.payer_otp = { ...payerOtp, reason: reason ?? 'required', attempts_remaining: left === undefined ? null : Math.max(0, left) };
+  }
+  return keep(b, body, ['action', 'transaction', ...PROCESS_STRINGS, 'three_ds_timeout', 'client_session', 'payer_otp']);
 }
 
 /** POST /pay/{kind}/verify, HTTP 200. Anything but `success` is a failure. */
 export function parseStepVerify(raw: unknown): StepVerifyResponse {
   const b = obj(raw) ?? {};
   if (str(b.status)?.toLowerCase() === 'success') {
-    return { status: 'success', transaction: obj(b.transaction) ? parseTransaction(b.transaction) : null };
+    const success: StepVerifyResponse = { status: 'success', transaction: obj(b.transaction) ? parseTransaction(b.transaction) : null };
+    // The provider asks for another step: its action and fields, read as a payment's answer reads them.
+    const { code: _code, status: _status, message: _message, transaction: _transaction, ...next } = parseProcess(b);
+    return next.action ? { ...success, ...next, action: next.action } : success;
   }
   const error = obj(b.error) ?? {};
   return {

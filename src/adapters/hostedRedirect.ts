@@ -1,12 +1,9 @@
 import { AppState, Linking } from 'react-native';
 
 /**
- * Opens PSP URLs in the system browser — never an embedded WebView.
- *
- * An https URL is opened directly. On Android 11 and later, canOpenURL()
- * answers false unless the app declares a browser intent in a `<queries>`
- * block, so asking first left the payer on a page that never opened. Every
- * device has a browser for https; only another scheme is checked first.
+ * Opens a provider's page in the system browser, never in a WebView.
+ * Resolves `false` when it cannot be opened. No `<queries>` block is needed
+ * in your Android manifest.
  */
 export async function openHostedRedirect(url: string): Promise<boolean> {
   try {
@@ -21,13 +18,13 @@ export async function openHostedRedirect(url: string): Promise<boolean> {
   }
 }
 
-/** Upper bound on waiting for the payer to come back from the PSP's page. */
+/** How long `openHostedRedirectAndWait()` waits for the payer to come back. */
 const RETURN_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
  * Opens `url` in the system browser, then resolves once the app is back in
- * the foreground (the payer finished or left the PSP's page) — or after
- * RETURN_TIMEOUT_MS. Resolves `false` straight away if the URL can't be opened.
+ * the foreground (the payer finished or left the provider's page), or after
+ * 30 minutes. Resolves `false` straight away if the URL can't be opened.
  */
 export async function openHostedRedirectAndWait(url: string): Promise<boolean> {
   let leftApp = false;

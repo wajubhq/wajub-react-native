@@ -25,22 +25,20 @@ import type {
 } from './types';
 
 export interface WajubSessionOptions {
-  /** Where the device fingerprint's install id is kept. Default: AsyncStorage. */
+  /** Where the SDK keeps its data: any `{ getItem, setItem }`. Default: AsyncStorage. */
   storage?: WajubStorage;
 }
 
 /**
- * Session-scoped checkout client — `/pay/*` without WebView, for a host that
- * draws its own UI. Every call goes through the SDK's transport: its headers,
- * timeouts and retries (a payment's retries resend the same Idempotency-Key).
- * The 1.4 methods report errors as 1.4 did; the v2 ones (`session()`,
- * `sdkConfig()`, `status()`, `submit()`, the step calls) with the spec's
- * catalogue.
+ * One payment, for an app that draws its own payment screens. The 1.4
+ * methods report errors as 1.4 did; `session()`, `sdkConfig()`, `status()`,
+ * `submit()` and the step calls with the codes and messages of the payment
+ * sheet.
  */
 export class WajubSession {
   private cachedSession: SessionData | null = null;
   private readonly client: PayClient;
-  /** The same transport, errors mapped by the spec's catalogue. */
+  /** The same client, with the payment sheet's errors. */
   private readonly v2: PayClient;
 
   constructor(
@@ -52,6 +50,7 @@ export class WajubSession {
     this.v2 = this.client.with({ errors: 'v2' });
   }
 
+  /** The payment, its methods and the merchant's branding; read once unless `forceRefresh`. */
   async loadSession(forceRefresh = false): Promise<SessionData> {
     if (!forceRefresh && this.cachedSession) {
       return this.cachedSession;
@@ -61,7 +60,7 @@ export class WajubSession {
     return session;
   }
 
-  /** GET /pay/session, fresh. */
+  /** The payment, its methods and the merchant's branding, read now. */
   async session(): Promise<SessionData> {
     this.cachedSession = await this.v2.getSession(this.token);
     return this.cachedSession;
@@ -71,24 +70,25 @@ export class WajubSession {
     return this.client.getSdkConfig(this.token);
   }
 
-  /** GET /pay/sdk-config, keyed by raw slug (`cm.mtn`, never `cm.mobile`). */
+  /** How each payment method collects its details. */
   async sdkConfig(): Promise<SdkConfig> {
     return this.v2.getSdkConfig(this.token);
   }
 
   /**
-   * GET /pay/status. Its `reference` is the payment's id (`transaction.id`),
-   * not the merchant's reference: never compare the two.
+   * Where the payment is. Its `reference` is the payment's id
+   * (`transaction.id`), not the merchant's reference: never compare the two.
    */
   async status(): Promise<PaymentStatus> {
     return this.v2.getStatus(this.token);
   }
 
   /**
-   * POST /pay/process, read spec v2's way (`ProcessOutcome`): the
-   * confirmation steps come with their `stepId` and `hint`. `idempotencyKey`:
-   * one per payment attempt (a new one when absent), reused by the automatic
-   * retries. Mobile Money `data`: `{ phone (E.164), country, operator? }`.
+   * Pays with one of the payment's `channels` (its slug): `complete`,
+   * `processing`, `requires_action` (a provider's page, or a confirmation
+   * step with its `stepId` and `hint`) or `failed`. Mobile Money `data`:
+   * `{ phone (E.164), country, operator? }`. `idempotencyKey`: pass the
+   * same key to retry the same payment; a new one is made when absent.
    */
   async submit(channel: string, data: Record<string, unknown>, options: { idempotencyKey?: string } = {}): Promise<ProcessOutcome> {
     const raw = await this.v2.process(this.token, channel, data, options);
@@ -110,10 +110,9 @@ export class WajubSession {
   }
 
   /**
-   * Card on a `hosted_redirect` channel (PayPal, Mollie, Paddle, Kkiapay,
-   * FedaPay, PayDunya, CinetPay): returns `requires_action` / `redirect` to
-   * the PSP's own card page. `billing` must carry every field sdk-config
-   * lists in the channel's `required_fields`.
+   * A card paid on the provider's own page: returns `requires_action` /
+   * `redirect` to it. `billing` carries every field of the method's
+   * `required_fields`.
    */
   async payCardHostedRedirect(
     channel: string,
@@ -124,9 +123,8 @@ export class WajubSession {
   }
 
   /**
-   * One-tap wallet channel (sdk-config `form`, no `required_fields`, channel
-   * type `wallet` — e.g. Djamo): returns `requires_action` / `redirect` to the
-   * wallet's payment page, which opens the wallet app on the device.
+   * A one-tap wallet: returns `requires_action` / `redirect` to the wallet's
+   * payment page, which opens the wallet app on the device.
    */
   async payWallet(channel: string): Promise<PaymentResult> {
     await this.loadSession();
@@ -134,8 +132,8 @@ export class WajubSession {
   }
 
   /**
-   * POST /pay/process. `idempotencyKey`: one per payment attempt (a new one
-   * is made when absent); the automatic retries of the call reuse it.
+   * A payment attempt, read the 1.4 way. `idempotencyKey`: pass the same
+   * key to retry the same payment; a new one is made when absent.
    */
   async process(channel: string, data: Record<string, unknown>, options: { idempotencyKey?: string } = {}): Promise<PaymentResult> {
     const raw = await this.client.process(this.token, channel, data, options);
@@ -143,11 +141,10 @@ export class WajubSession {
   }
 
   /**
-   * Opens (or re-serves) a PSP-hosted checkout for a card channel whose
-   * sdk-config has `client_session: true` (Paystack, Flutterwave). Returns
-   * `requires_action` / `client_session` — open `client_session.hosted_url`
-   * (or launch the PSP's native SDK with it), then call
-   * `completeClientSession()`. See `payCardHosted()` for the one-call flow.
+   * Opens the provider's own card checkout, for a method whose
+   * `client_session` is `true`. Returns `requires_action` / `client_session`:
+   * open `client_session.hosted_url` (or launch the provider's SDK with it),
+   * then call `completeClientSession()`. `payCardHosted()` does it all.
    */
   async startClientSession(channel: string, options: ClientSessionOptions = {}): Promise<PaymentResult> {
     await this.loadSession();
@@ -156,9 +153,9 @@ export class WajubSession {
   }
 
   /**
-   * Verifies a client session once the payer is back. `complete` = paid;
-   * `processing` = not confirmed yet (keep `watchStatus()` running — the PSP
-   * webhook settles it). Throws WajubError (402) on a definitive failure.
+   * The payer is back from the provider's checkout. `complete`: paid;
+   * `processing`: not confirmed yet, keep `watchStatus()` running. Throws a
+   * `WajubError` with a `decline_code` on a decline.
    */
   async completeClientSession(clientSessionId: string, channel = 'card'): Promise<PaymentResult> {
     const raw = await this.client.completeClientSession(this.token, clientSessionId);
@@ -166,8 +163,8 @@ export class WajubSession {
   }
 
   /**
-   * One-call hosted card payment: start the client session, open the PSP's
-   * page in the system browser, wait for the payer to come back, complete.
+   * A card paid in the provider's own checkout, in one call: opens it in the
+   * system browser, waits for the payer to come back, and checks the payment.
    */
   async payCardHosted(channel: string, options: ClientSessionOptions = {}): Promise<PaymentResult> {
     const started = await this.startClientSession(channel, options);
@@ -224,7 +221,7 @@ export class WajubSession {
     return this.v2.verifyStep(this.token, 'address', { address_id: addressId, ...address });
   }
 
-  /** Asks for the step again; the API does nothing today, and answers 200. */
+  /** Sends the step's code again. */
   resend(kind: ConfirmStepKind, stepId: string): Promise<void> {
     return this.v2.resendStep(this.token, kind, stepId);
   }
@@ -239,6 +236,7 @@ export class WajubSession {
     return this.v2.send3ds(this.token, threeDsId);
   }
 
+  /** Opens the provider's page a `requires_action` result asks for; `false` when there is none. */
   async handleRedirectAction(result: PaymentResult): Promise<boolean> {
     if (result.status !== 'requires_action') {
       return false;
@@ -251,16 +249,16 @@ export class WajubSession {
     return openHostedRedirect(url);
   }
 
+  /** Cancels the payment for good; resolves with the merchant's page for a cancelled payer, if any. */
   async cancel(): Promise<string | null> {
     const result = await this.client.cancel(this.token);
     return result.redirect_url;
   }
 
   /**
-   * For a payment sheet the payer closed. When nothing had been `submitted`,
-   * the payment is cancelled on Wajub too (`POST /pay/cancel`), as the hosted
-   * checkout does; an attempt under way is left alone, since a Mobile Money
-   * approval can still land. Best effort: it never rejects.
+   * For a payment screen of your own the payer closed: when nothing had been
+   * `submitted`, the payment is cancelled; an attempt under way is left
+   * alone, since a Mobile Money approval can still land. It never rejects.
    */
   async cancelIfNothingSubmitted(submitted: boolean): Promise<void> {
     if (submitted) return;
@@ -272,8 +270,8 @@ export class WajubSession {
   }
 
   /**
-   * Watches the payment until it ends: polling on the spec's schedule next to
-   * the realtime channel. `onUpdate` gets each new result; returns a stop function.
+   * Reports the payment's status until it ends: `onUpdate` gets each result.
+   * Returns a function that stops it.
    */
   watchStatus(onUpdate: (result: PaymentResult) => void, intervalMs?: number): () => void {
     let stop: (() => void) | null = null;

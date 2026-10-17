@@ -17,7 +17,10 @@ const EXPECTED: Array<[string, string, string, boolean, string | null, string | 
   ['birthday-verify-422-format', 'validation_error', 'invalid_request_error', true, null, 'birthday', null, null],
   ['broadcasting-auth-403', 'merchant_restricted', 'payment_error', false, null, null, null, null],
   ['cancel-400-not-cancellable', 'not_processable', 'invalid_request_error', false, null, null, null, null],
+  ['cancel-409-payment-in-progress', 'payment_in_progress', 'invalid_request_error', false, null, null, null, null],
+  ['cancel-409-payment-partly-paid', 'payment_partly_paid', 'invalid_request_error', false, null, null, null, null],
   ['client-session-422-sandbox', 'client_session_unavailable', 'invalid_request_error', false, null, 'request', null, null],
+  ['client-session-422-security-check-failed', 'security_check_failed', 'invalid_request_error', true, null, 'request', null, null],
   ['client-session-complete-402', 'failed', 'payment_error', true, 'failed', null, null, null],
   ['client-session-complete-422-expired', 'client_session_expired', 'invalid_request_error', true, null, 'request', null, null],
   ['error-401-invalid-token', 'session_not_found', 'authentication_error', false, null, null, null, null],
@@ -31,6 +34,7 @@ const EXPECTED: Array<[string, string, string, boolean, string | null, string | 
   ['process-400-not-processable', 'not_processable', 'invalid_request_error', false, null, null, null, null],
   ['process-402-insufficient-funds-sandbox', 'insufficient_funds', 'payment_error', true, 'insufficient_funds', null, null, null],
   ['process-402-merchant-not-verified', 'merchant_not_verified', 'payment_error', false, 'merchant_not_verified', null, null, null],
+  ['process-402-payer-otp-attempts-exceeded', 'otp_attempts_exceeded', 'payment_error', true, 'otp_attempts_exceeded', null, null, null],
   ['process-403-restricted', 'payment_method_restricted', 'payment_error', true, null, null, null, null],
   ['process-403-shield-blocked', 'shield_blocked', 'payment_error', false, null, null, null, 'BLK-PLACEHOLDER'],
   ['process-409-order-not-validated', 'order_not_validated', 'invalid_request_error', false, null, null, null, null],
@@ -39,6 +43,7 @@ const EXPECTED: Array<[string, string, string, boolean, string | null, string | 
   ['process-422-operator-mismatch', 'validation_error', 'invalid_request_error', true, null, 'phone', null, null],
   ['process-422-over-mobile-money-limit-sandbox', 'validation_error', 'invalid_request_error', true, null, 'request', null, null],
   ['process-422-raw-card-data-live', 'raw_card_data_not_accepted', 'invalid_request_error', false, null, 'card', null, null],
+  ['process-422-security-check-failed', 'security_check_failed', 'invalid_request_error', true, null, 'request', null, null],
   ['process-422-sandbox-invalid-test-number', 'validation_error', 'invalid_request_error', true, null, 'data.phone', null, null],
   ['process-422-unknown-channel', 'validation_error', 'invalid_request_error', true, null, 'channel', null, null],
   // Two fields at fault: no single param.
@@ -60,7 +65,7 @@ function mapped(name: string, lang: 'en' | 'fr' = 'en'): WajubError {
     status: f.http_status,
     body: f.body,
     headers: { get: (n: string) => Object.entries(headers).find(([k]) => k.toLowerCase() === n.toLowerCase())?.[1] ?? null },
-    phase: f.request?.path === '/pay/session' ? 'load' : 'payment',
+    phase: f.request?.path === '/pay/session' ? 'load' : f.request?.path === '/pay/cancel' ? 'cancel' : 'payment',
     lang,
   });
 }
@@ -120,6 +125,17 @@ describe('ER — errors', () => {
     expect(mapped('process-409-payment-in-progress', 'fr').message).toBe(ERROR_CATALOGUE.server_error.fr);
     expect(mapped('process-422-over-mobile-money-limit-sandbox', 'fr').message).toBe('Vérifiez les informations saisies.');
     expect(mapped('process-422-over-mobile-money-limit-sandbox').message).toBe(body('process-422-over-mobile-money-limit-sandbox').message);
+    // A cancel refused: its own words, `payment_in_progress` included — on a payment attempt
+    // that code keeps its reading above.
+    expect(mapped('cancel-409-payment-partly-paid').message).toBe("Part of this payment has already been paid, so it can't be cancelled.");
+    expect(mapped('cancel-409-payment-partly-paid', 'fr').message).toBe('Une partie de ce paiement a déjà été réglée : il ne peut plus être annulé.');
+    expect(mapped('cancel-409-payment-in-progress')).toMatchObject({
+      code: 'payment_in_progress',
+      type: 'invalid_request_error',
+      retryable: false,
+      message: "This payment is being paid and can't be cancelled now.",
+    });
+    expect(mapped('cancel-409-payment-in-progress').localized('fr').message).toBe('Ce paiement est en cours de règlement et ne peut pas être annulé maintenant.');
     // And the same error, shown in the other language.
     expect(mapped('process-failed-402').localized('fr').message).toBe('Fonds insuffisants.');
     const step = parseStepVerify(body('otp-verify-invalid'));

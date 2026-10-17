@@ -118,6 +118,31 @@ describe('CD — card', () => {
     const sandbox = await payCard('sdk-config-sandbox', 'process-requires-3ds-sandbox', { 'card.number': '4000 0566 5566 5556', card_holder: 'Awa Ngono', expiry_month: '12', expiry_year: '30', cvv: '123' }, 'session-sandbox-cm');
     expect(api.callsTo('POST /pay/process')[0].body.data).toMatchObject({ 'card.number': '4000056655665556', cvv: '123' });
     sandbox.controller.hostGone();
+    api.restore();
+
+    // Typed on an Arabic-Indic or Persian keyboard: the same card, in ASCII digits.
+    const arabic = await payCard(
+      'sdk-config-sandbox',
+      'process-requires-3ds-sandbox',
+      { 'card.number': '٤٠٠٠ ٠٥٦٦ ٥٥٦٦ ٥٥٥٦', card_holder: 'Awa Ngono', expiry_month: '۱۲', expiry_year: '۳۰', cvv: '١٢٣' },
+      'session-sandbox-cm',
+    );
+    expect(api.callsTo('POST /pay/process')[0].body.data).toMatchObject({ 'card.number': '4000056655665556', expiry_month: '12', expiry_year: '30', cvv: '123' });
+    arabic.controller.hostGone();
+    api.restore();
+
+    // The card's digits are digits: anything else is refused before anything is sent.
+    const letters = await payCard('sdk-config-sandbox', 'process-requires-3ds-sandbox', { 'card.number': '4000 0566 55xx 5556', card_holder: 'Awa Ngono', expiry_month: '12', expiry_year: '30', cvv: '12a' }, 'session-sandbox-cm');
+    expect(api.callsTo('POST /pay/process')).toHaveLength(0);
+    expect(letters.controller.getSnapshot().fieldErrors).toMatchObject({ 'card.number': expect.any(String), cvv: expect.any(String) });
+    letters.controller.hostGone();
+    api.restore();
+
+    // A provider's page: the billing fields it asks for, digits in ASCII.
+    const billing = { first_name: 'Awa', last_name: 'Ngono', email: 'awa.ngono@example.com', phone: '۰۷۱۲۳۴۵۶۷۸', address: 'Rue ١٢', city: 'Abidjan', country: 'CI', state: 'Abidjan', zip_code: '٠٠٢٢٥' };
+    const hosted = await payCard('sdk-config-card-cinetpay', 'process-redirect-card-hosted', billing);
+    expect(api.callsTo('POST /pay/process')[0].body.data).toMatchObject({ phone: '0712345678', address: 'Rue 12', zip_code: '00225' });
+    hosted.controller.hostGone();
   });
 });
 
@@ -230,17 +255,18 @@ describe('PA — process answers', () => {
     validation.controller.hostGone();
     api.restore();
 
-    // An Orange number on cm.mtn (sandbox lets it through): the API's English
-    // refusal becomes the SDK's own words.
+    // A number the sheet names no operator for, refused on cm.mtn as an Orange one by the
+    // API's own lookup: its English refusal becomes the SDK's own words.
     const operators = body('session-sandbox-cm');
-    operators.channels = ['mtn', 'orange'].map((op) => ({ ...operators.channels[0], id: `cm.${op}`, slug: `cm.${op}`, logo: null }));
+    const single = operators.channels.find((c: { slug: string }) => c.slug === 'cm.eu');
+    operators.channels = ['mtn', 'orange'].map((op) => ({ ...single, id: `cm.${op}`, slug: `cm.${op}`, logo: null, logo_png: null }));
     const mismatch = await sheet(
       { 'GET /pay/session': { status: 200, body: operators }, 'GET /pay/sdk-config': 'sdk-config-sandbox', 'POST /pay/process': 'process-422-operator-mismatch' },
       { locale: 'en' },
     );
     mismatch.controller.chooseMethod('mobile_money');
     const mtn = operatorChoices(mismatch.controller.getSnapshot().session!.channels, 'CM', 'en')[0];
-    await mismatch.controller.payMobileMoney({ phone: '691234567', country: 'CM', choice: mtn, pickedByHand: true });
+    await mismatch.controller.payMobileMoney({ phone: '621234567', country: 'CM', choice: mtn, pickedByHand: true });
     await settle();
     expect(api.callsTo('POST /pay/process')[0].body.channel).toBe('cm.mtn');
     expect(mismatch.controller.getSnapshot().fieldErrors.phone).toBe(
@@ -405,6 +431,36 @@ describe('PA — process answers', () => {
     s.controller.dismiss();
     await expect(s.controller.result).resolves.toMatchObject({ status: 'processing' });
     expect(api.callsTo('POST /pay/cancel')).toHaveLength(0);
+    api.restore();
+
+    // Read as a request without an answer (TR-09): a newer refusal ends the attempt at once…
+    jest.useFakeTimers();
+    const accepted = { status: 202, body: { code: 202, status: 'Accepted', message: 'Accepted.' } };
+    const pendingWith = (error_code: string | null) => ({ status: 200, body: { transaction: { reference: 'trx_PVrU8x2kQ1mNa7Lb3cDe', status: 'pending', error_code, payer_message: null } } });
+    const refused = await payMtn(accepted, { locale: 'en' }, 'session-cm-aggregate', { 'GET /pay/status': pendingWith('insufficient_funds') });
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(refused.controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { retryable: true } });
+    refused.controller.hostGone();
+    api.restore();
+
+    // …the refusal left on the payment at load is not this attempt's, and a `pending` a minute on sends
+    // the payer back to the form; the next Pay goes under the same key.
+    for (const [session, code] of [['session-cm-aggregate', null], ['session-pending-after-refusal', 'insufficient_funds']] as const) {
+      const waiting = await payMtn(accepted, { locale: 'en' }, session, { 'GET /pay/status': pendingWith(code), 'GET /pay/sdk-config': 'sdk-config-sandbox' });
+      expect(waiting.controller.getSnapshot().state).toBe('PENDING');
+      await jest.advanceTimersByTimeAsync(55_000);
+      expect(waiting.controller.getSnapshot().state).toBe('PENDING');
+      await jest.advanceTimersByTimeAsync(5_000);
+      expect(waiting.controller.getSnapshot()).toMatchObject({ state: 'COLLECTING_DETAILS', banner: { code: 'network_error', retryable: true } });
+      const key = api.callsTo('POST /pay/process')[0].headers['Idempotency-Key'];
+      const choice = operatorChoices(waiting.controller.getSnapshot().session!.channels, 'CM', 'en')[0];
+      await waiting.controller.payMobileMoney({ phone: '677123456', country: 'CM', choice, pickedByHand: true });
+      await settle();
+      const calls = api.callsTo('POST /pay/process');
+      expect(calls[calls.length - 1].headers['Idempotency-Key']).toBe(key);
+      waiting.controller.hostGone();
+      api.restore();
+    }
   });
 
   it('PA-02 fires nothing after the sheet closed', async () => {
@@ -438,6 +494,29 @@ describe('PA — process answers', () => {
     await jest.advanceTimersByTimeAsync(30_000);
     expect(s.onPaymentStarted).toHaveBeenCalledTimes(1);
     s.controller.hostGone();
+    api.restore();
+
+    // A 202 asking for the payer's own code charged nothing: it fires once the code is accepted.
+    const code = await sheet({
+      'GET /pay/session': 'session-payer-otp-announced',
+      'GET /pay/sdk-config': 'sdk-config-cm-stripe',
+      'POST /pay/process': ['process-payer-otp-required', 'process-payer-otp-accepted-sandbox'],
+    });
+    code.controller.chooseMethod('mobile_money');
+    const orange = operatorChoices(code.controller.getSnapshot().session!.channels, 'BF', 'en').find((c) => c.id === 'orange')!;
+    // The announced screen first, nothing sent; the first answer asks for the code again.
+    await code.controller.payMobileMoney({ phone: '70000000', country: 'BF', choice: orange, pickedByHand: false });
+    expect(code.onPaymentStarted).not.toHaveBeenCalled();
+    await code.controller.submitPayerOtp('123456');
+    await settle();
+    expect(code.controller.getSnapshot().state).toBe('PAYER_OTP_REQUIRED');
+    expect(code.onPaymentStarted).not.toHaveBeenCalled();
+    await code.controller.submitPayerOtp('123456');
+    await settle();
+    expect(code.controller.getSnapshot().state).toBe('APPROVAL_REQUIRED');
+    expect(code.onPaymentStarted).toHaveBeenCalledTimes(1);
+    expect(code.onPaymentStarted).toHaveBeenCalledWith({ method: 'mobile_money', channel: 'bf.orange' });
+    code.controller.hostGone();
   });
 });
 

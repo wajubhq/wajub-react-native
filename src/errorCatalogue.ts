@@ -187,6 +187,19 @@ export const ERROR_CATALOGUE: Record<string, Entry> = {
     en: 'This payment can no longer be processed.',
     fr: 'Ce paiement ne peut plus être traité.',
   },
+  payment_partly_paid: {
+    type: 'invalid_request_error',
+    retryable: false,
+    en: "Part of this payment has already been paid, so it can't be cancelled.",
+    fr: 'Une partie de ce paiement a déjà été réglée : il ne peut plus être annulé.',
+  },
+  /** `payment_in_progress` answering a cancel (its code stays `payment_in_progress`). */
+  payment_in_progress_on_cancel: {
+    type: 'invalid_request_error',
+    retryable: false,
+    en: "This payment is being paid and can't be cancelled now.",
+    fr: 'Ce paiement est en cours de règlement et ne peut pas être annulé maintenant.',
+  },
   order_not_validated: {
     type: 'invalid_request_error',
     retryable: false,
@@ -233,6 +246,12 @@ export const ERROR_CATALOGUE: Record<string, Entry> = {
     "Cette adresse n'a pas été acceptée. Encore {n} essais.",
   ),
   address_expired: form(STEP_EXPIRED.en, STEP_EXPIRED.fr),
+  otp_attempts_exceeded: {
+    type: 'payment_error',
+    retryable: true,
+    en: 'Your operator refused too many codes for this payment. Choose another payment method.',
+    fr: 'Votre opérateur a refusé trop de codes pour ce paiement. Choisissez un autre moyen de paiement.',
+  },
   max_attempts_exceeded: {
     type: 'payment_error',
     retryable: true,

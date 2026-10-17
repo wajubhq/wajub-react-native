@@ -30,6 +30,29 @@ export interface SheetStrings {
   phoneNumber: string;
   mobileMoneyInstructions: string;
   approveTitle: string;
+  /** The code the payer generates in the operator's menu. */
+  payerOtp: {
+    title: string;
+    description: string;
+    dial: string;
+    copy: string;
+    copied: string;
+    amount: string;
+    stepsTitle: string;
+    /** The three steps when none are given; `amount` null: none was given. */
+    genericSteps: (amount: string | null) => [string, string, string];
+    codeLabel: string;
+    submit: string;
+    changeMethod: string;
+    sandboxHint: (code: string) => string;
+    approvalMessage: string;
+    formHint: (ussdCode: string) => string;
+    formHintGeneric: string;
+    attemptsLeft: (count: number) => string;
+    exactLength: (length: number) => string;
+    lengthRange: (min: number, max: number) => string;
+    refused: string;
+  };
   approveBody: (phone: string) => string;
   noCodeToEnter: string;
   instructions: string;
@@ -127,6 +150,31 @@ const en: SheetStrings = {
   phoneNumber: 'Phone number',
   mobileMoneyInstructions: 'You will receive a notification to confirm the payment',
   approveTitle: 'Approve the payment on your phone',
+  payerOtp: {
+    title: 'Generate your payment code',
+    description: 'Before you pay, your operator asks for a code you generate yourself from its menu, for the exact amount of the payment.',
+    dial: 'Code to dial',
+    copy: 'Copy',
+    copied: 'Copied',
+    amount: 'Exact amount to enter',
+    stepsTitle: 'How to get your code',
+    genericSteps: (amount) => [
+      "Open your operator's Mobile Money menu (USSD code or app).",
+      amount ? `Generate a payment code for the exact amount: ${amount}.` : 'Generate a payment code for the exact amount.',
+      'Enter the code you received below.',
+    ],
+    codeLabel: 'Payment code',
+    submit: 'Confirm payment',
+    changeMethod: 'Use another payment method',
+    sandboxHint: (code) => `Test mode: enter the code ${code}. Any other code is refused.`,
+    approvalMessage: 'Code received. Your operator is processing the payment, this can take a moment.',
+    formHint: (ussdCode) => `For this payment, you will generate a code by dialing ${ussdCode}: the next step guides you.`,
+    formHintGeneric: "For this payment, you will generate a code from your operator's menu: the next step guides you.",
+    attemptsLeft: (count) => (count <= 0 ? 'No tries left.' : count === 1 ? '1 try left.' : `${count} tries left.`),
+    exactLength: (length) => `The code must have ${length} digits.`,
+    lengthRange: (min, max) => `The code must have between ${min} and ${max} digits.`,
+    refused: 'Your operator did not accept this code. Generate a new one and try again.',
+  },
   approveBody: (phone) => `A request was sent to ${phone}.`,
   noCodeToEnter: 'Check your phone. No code to enter.',
   instructions: 'Instructions',
@@ -226,6 +274,31 @@ const fr: SheetStrings = {
   phoneNumber: 'Numéro de téléphone',
   mobileMoneyInstructions: 'Vous recevrez une notification pour confirmer le paiement',
   approveTitle: 'Validez le paiement sur votre téléphone',
+  payerOtp: {
+    title: 'Générez votre code de paiement',
+    description: 'Avant de payer, votre opérateur demande un code que vous générez vous-même depuis son menu, pour le montant exact du paiement.',
+    dial: 'Code à composer',
+    copy: 'Copier',
+    copied: 'Copié',
+    amount: 'Montant exact à saisir',
+    stepsTitle: 'Comment obtenir votre code',
+    genericSteps: (amount) => [
+      'Ouvrez le menu Mobile Money de votre opérateur (code USSD ou application).',
+      amount ? `Générez un code de paiement pour le montant exact : ${amount}.` : 'Générez un code de paiement pour le montant exact.',
+      'Saisissez ci-dessous le code que vous avez reçu.',
+    ],
+    codeLabel: 'Code de paiement',
+    submit: 'Valider le paiement',
+    changeMethod: 'Changer de moyen de paiement',
+    sandboxHint: (code) => `Mode test : saisissez le code ${code}. Tout autre code est refusé.`,
+    approvalMessage: 'Code reçu. Votre opérateur traite le paiement, cela peut prendre quelques instants.',
+    formHint: (ussdCode) => `Pour ce paiement, vous générerez un code en composant ${ussdCode} : l'étape suivante vous guide.`,
+    formHintGeneric: "Pour ce paiement, vous générerez un code depuis le menu de votre opérateur : l'étape suivante vous guide.",
+    attemptsLeft: (count) => (count <= 0 ? 'Plus aucun essai possible.' : count === 1 ? 'Il vous reste 1 essai.' : `Il vous reste ${count} essais.`),
+    exactLength: (length) => `Le code doit comporter ${length} chiffres.`,
+    lengthRange: (min, max) => `Le code doit comporter entre ${min} et ${max} chiffres.`,
+    refused: "Votre opérateur n'a pas accepté ce code. Générez-en un nouveau et réessayez.",
+  },
   approveBody: (phone) => `Une demande a été envoyée au ${phone}.`,
   noCodeToEnter: 'Vérifiez votre téléphone. Aucun code à saisir.',
   instructions: 'Instructions',

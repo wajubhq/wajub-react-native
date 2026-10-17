@@ -1,9 +1,12 @@
 /**
- * Mobile Money tables and number rules, from `src/data/mobile-money.json` —
- * a byte-identical copy of the spec's data file (packages/mobile/spec/data),
- * shared with the web checkout and the other SDKs. No table is repeated here.
+ * Mobile Money tables and number rules, from `src/data/mobile-money.json`,
+ * the spec's data file as sync-spec.sh copies it (packages/mobile/spec/data).
+ * No table is repeated here.
  */
 import raw from '../data/mobile-money.json';
+import { toAsciiDigits } from '../digits';
+
+export { toAsciiDigits };
 
 export interface OperatorBrand {
   label: string;
@@ -20,8 +23,15 @@ export interface PrefixRule {
 export interface CountryRules {
   name: string;
   dial_code: string;
+  /** `significant`: the leading 0 is part of the number (kept, and sent). `trunk`: it is dropped. */
+  leading_zero: 'trunk' | 'significant';
   national_number_length: number | null;
-  e164_trunk_zero: 'keep' | 'drop';
+  /** What every number starts with, when the plan says so ("0", "01"). */
+  number_prefix: string | null;
+  /** The mobile ranges a number typed without its 0 is given it back onto. */
+  mobile_prefixes: string[] | null;
+  /** Numbers of the earlier plan: `length` digits whose start (a key of `map`) becomes its value. */
+  earlier: { length: number; map: Record<string, string> } | null;
   placeholder: string;
   placeholder_formatted: string;
   operators: string[];
@@ -35,17 +45,25 @@ export interface OperatorInfo {
   brand: OperatorBrand | null;
 }
 
+export interface SandboxTestNumbers {
+  /** The last digits of a test number, and the outcome they ask for. */
+  outcome_suffixes: Record<string, string>;
+  /** Per country, per operator: what a test number starts with (with its "+"). */
+  prefixes: Record<string, Record<string, string[]>>;
+}
+
 export interface MobileMoneyData {
   schema_version: number;
   fallback_brand: { color: string; background: string };
   loose_length: { min: number; max: number };
   operator_independent_wallets: string[];
+  sandbox_test_numbers: SandboxTestNumbers;
   countries: Record<string, CountryRules>;
   operators: Record<string, OperatorInfo>;
 }
 
 /** The data file versions this SDK reads. */
-export const SUPPORTED_SCHEMA_VERSIONS = [1];
+export const SUPPORTED_SCHEMA_VERSIONS = [2];
 
 /** Checks the shape version: an unknown one is refused rather than misread. */
 export function loadMobileMoneyData(source: unknown): MobileMoneyData {
@@ -68,36 +86,167 @@ export function countryRules(country: string): CountryRules | undefined {
   return mobileMoneyData().countries[country.toUpperCase()];
 }
 
-/** Keep 0-9 and '+', then drop every '+'. */
+/** Other decimal digits read as ASCII; keep 0-9 and '+', then drop every '+'. */
 export function sanitize(input: string): string {
-  return input.replace(/[^0-9+]/g, '').replace(/\+/g, '');
+  return toAsciiDigits(input).replace(/[^0-9+]/g, '').replace(/\+/g, '');
 }
 
-/** Without the country's dial code, if the number starts with it, and without leading zeros. */
+const dialDigits = (rules: CountryRules | undefined) => rules?.dial_code.replace('+', '') ?? '';
+
+/** How the digits were typed: the national part, or another country's whole number (`foreign`). */
+interface TypedReading {
+  digits: string;
+  foreign: boolean;
+}
+
+/** The key of `map` the digits start with, the longest when several do. */
+function earlierKey(digits: string, map: Record<string, string>): string | null {
+  let found: string | null = null;
+  for (const key of Object.keys(map)) {
+    if (digits.startsWith(key) && (!found || key.length > found.length)) found = key;
+  }
+  return found;
+}
+
+/** An earlier plan's number in its current form; the leading 0 dropped (trunk) or kept and given back (significant). */
+function nationalSteps(typed: string, rules: CountryRules): string {
+  let digits = typed;
+  if (rules.earlier && digits.length === rules.earlier.length) {
+    const key = earlierKey(digits, rules.earlier.map);
+    if (key) digits = `${rules.earlier.map[key]}${digits.slice(key.length)}`;
+  }
+  if (rules.leading_zero === 'trunk') return digits.replace(/^0+/, '');
+  const withZero = `0${digits}`;
+  if (
+    !digits.startsWith('0') &&
+    rules.national_number_length !== null &&
+    withZero.length === rules.national_number_length &&
+    (rules.mobile_prefixes ?? []).some((prefix) => withZero.startsWith(prefix))
+  ) {
+    return withZero;
+  }
+  return digits;
+}
+
+/** The digits make a complete national number of the plan as they are. */
+function completeNational(digits: string, rules: CountryRules): boolean {
+  const national = nationalSteps(digits, rules);
+  return national.length === rules.national_number_length && (!rules.number_prefix || national.startsWith(rules.number_prefix));
+}
+
+/**
+ * The digits as typed. Written with `+` or `00` (the international prefix):
+ * after the country's dial code, or another country's whole number. Written
+ * nationally: the dial code left out only when the digits are not a national
+ * number as they are (a Ghanaian number may start like its dial code).
+ * `doubleZeroIsPrefix: false` reads a leading `00` as typed digits.
+ */
+function readTyped(input: string, country: string, doubleZeroIsPrefix = true): TypedReading {
+  const digits = sanitize(input);
+  const rules = countryRules(country);
+  if (!rules) return { digits, foreign: false };
+  const dial = dialDigits(rules);
+  const first = toAsciiDigits(input).match(/[0-9+]/)?.[0];
+  const international = first === '+' ? digits : doubleZeroIsPrefix && digits.startsWith('00') ? digits.slice(2) : null;
+  if (international !== null) {
+    return international.startsWith(dial) ? { digits: international.slice(dial.length), foreign: false } : { digits: international, foreign: true };
+  }
+  if (digits.startsWith(dial) && !completeNational(digits, rules)) return { digits: digits.slice(dial.length), foreign: false };
+  return { digits, foreign: false };
+}
+
+/** The digits as typed, without the country's dial code (another country's number: its digits). */
+export function typedNationalDigits(input: string, country: string): string {
+  return readTyped(input, country).digits;
+}
+
+/** Written with another country's dial code, after `+` or `00`: not a number of `country`. */
+export function isForeignNumber(input: string, country: string): boolean {
+  return readTyped(input, country).foreign;
+}
+
+/**
+ * The national number: the dial code left out, an earlier plan's number in
+ * its current form, the leading 0 dropped where it is a trunk prefix and
+ * kept — or given back onto a mobile range — where it is part of the number.
+ * Another country's number: its digits as written.
+ */
 export function nationalDigits(input: string, country: string): string {
-  let digits = sanitize(input);
-  const dial = countryRules(country)?.dial_code.replace('+', '');
-  if (dial && digits.startsWith(dial)) digits = digits.slice(dial.length);
-  return digits.replace(/^0+/, '');
+  const rules = countryRules(country);
+  if (!rules) return sanitize(input).replace(/^0+/, '');
+  const typed = readTyped(input, country);
+  return typed.foreign ? typed.digits : nationalSteps(typed.digits, rules);
 }
 
-export function isValidNumber(input: string, country: string): boolean {
-  const length = countryRules(country)?.national_number_length;
-  if (length) return nationalDigits(input, country).length === length;
+/**
+ * A test number of a sandbox session: the prefix of one of the country's test
+ * operators, then zeros and an outcome suffix. Its operator, and the number
+ * as it is sent; null when the input is none. Read by the plan, then as the
+ * digits typed after the dial code, then with a leading `00` as typed digits;
+ * never as another country's number.
+ */
+export function sandboxTestNumber(input: string, country: string): { operator: string; e164: string } | null {
+  const data = mobileMoneyData();
+  const byOperator = data.sandbox_test_numbers?.prefixes[country.toUpperCase()];
+  const rules = countryRules(country);
+  if (!byOperator || !rules) return null;
+  const dial = dialDigits(rules);
+  const suffixes = Object.keys(data.sandbox_test_numbers.outcome_suffixes);
+  const ending = new RegExp(`^0*(?:${suffixes.join('|')})$`);
+  const typed = readTyped(input, country);
+  const asDigits = readTyped(input, country, false);
+  const readings: string[] = [];
+  if (!typed.foreign) readings.push(`${dial}${nationalSteps(typed.digits, rules)}`, `${dial}${typed.digits}`);
+  if (!asDigits.foreign) readings.push(`${dial}${asDigits.digits}`);
+  for (const reading of readings) {
+    for (const [operator, prefixes] of Object.entries(byOperator)) {
+      for (const prefix of prefixes) {
+        const start = prefix.replace('+', '');
+        if (reading.startsWith(start) && ending.test(reading.slice(start.length))) return { operator, e164: `+${reading}` };
+      }
+    }
+  }
+  return null;
+}
+
+/** In a sandbox session, a test number is valid whatever the numbering plan says. Another country's is not. */
+export function isValidNumber(input: string, country: string, sandbox = false): boolean {
+  if (sandbox && sandboxTestNumber(input, country)) return true;
+  const rules = countryRules(country);
+  if (rules && isForeignNumber(input, country)) return false;
+  if (rules && rules.national_number_length !== null) {
+    const digits = nationalDigits(input, country);
+    return digits.length === rules.national_number_length && (!rules.number_prefix || digits.startsWith(rules.number_prefix));
+  }
   const { min, max } = mobileMoneyData().loose_length;
-  const digits = sanitize(input).length;
-  return digits >= min && digits <= max;
+  const length = sanitize(input).length;
+  return length >= min && length <= max;
 }
 
 export function isOperatorIndependent(operator: string): boolean {
   return mobileMoneyData().operator_independent_wallets.includes(operator);
 }
 
-/** The operator the number's prefix names, or null. Wallets held whatever the operator are never detected. */
-export function detectOperator(input: string, country: string): string | null {
-  const digits = nationalDigits(input, country);
+/**
+ * The operator the number's prefix names, or null; a number still being typed
+ * without its leading 0 is read with it. Wallets held whatever the operator,
+ * and another country's number, name none. In a sandbox session, a test
+ * number names its own.
+ */
+export function detectOperator(input: string, country: string, sandbox = false): string | null {
+  if (sandbox) {
+    const test = sandboxTestNumber(input, country);
+    if (test) return test.operator;
+  }
+  const rules = countryRules(country);
+  if (!rules || isForeignNumber(input, country)) return null;
+  let digits = nationalDigits(input, country);
   if (!digits) return null;
-  for (const rule of countryRules(country)?.prefix_rules ?? []) {
+  if (rules.number_prefix && !digits.startsWith('0')) {
+    const key = rules.earlier ? earlierKey(digits, rules.earlier.map) : null;
+    digits = key && rules.earlier ? `${rules.earlier.map[key]}${digits.slice(key.length)}` : `0${digits}`;
+  }
+  for (const rule of rules.prefix_rules) {
     if (rule.starts_with.some((prefix) => digits.startsWith(prefix))) {
       return isOperatorIndependent(rule.operator) ? null : rule.operator;
     }
@@ -106,17 +255,25 @@ export function detectOperator(input: string, country: string): string | null {
 }
 
 /**
- * Dial code + national digits; Côte d'Ivoire keeps its leading 0 (the data
- * file's `errata`). A country outside the tables keeps an international
- * number as typed (`+260971234567`).
+ * The number as it is sent: the dial code and the national number (Côte
+ * d'Ivoire, Benin, Congo keep their 0). Another country's number goes as
+ * written; a country outside the tables keeps an international number as
+ * typed (`+260971234567`). In a sandbox session, a test number goes as it was
+ * read.
  */
-export function toE164(input: string, country: string): string {
+export function toE164(input: string, country: string, sandbox = false): string {
+  if (sandbox) {
+    const test = sandboxTestNumber(input, country);
+    if (test) return test.e164;
+  }
   const rules = countryRules(country);
   if (!rules) {
     const typed = input.trim();
     return /^(\+|00)/.test(typed) ? `+${sanitize(typed.replace(/^00/, ''))}` : sanitize(typed);
   }
-  return `${rules?.dial_code ?? ''}${rules?.e164_trunk_zero === 'keep' ? '0' : ''}${nationalDigits(input, country)}`;
+  const typed = readTyped(input, country);
+  if (typed.foreign) return `+${typed.digits}`;
+  return `${rules.dial_code}${nationalSteps(typed.digits, rules)}`;
 }
 
 /** Digits only, at most 15, grouped by two: "671234567" → "67 12 34 56 7". */

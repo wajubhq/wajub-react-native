@@ -20,13 +20,13 @@ async function step(process: string, routes: Record<string, Answer | Answer[]> =
   });
   const onStateChange = jest.fn();
   const onError = jest.fn();
-  const { controller } = makeController({ onStateChange, onError, ...options });
+  const { controller, openUrl } = makeController({ onStateChange, onError, ...options });
   controller.start();
   await settle();
   controller.chooseMethod('card');
   await controller.payCard({ email: 'awa.ngono@example.com' });
   await settle();
-  return { controller, onStateChange, onError };
+  return { controller, onStateChange, onError, openUrl };
 }
 
 const STEPS: Array<[ConfirmStepKind, string, Record<string, string>, Record<string, string>]> = [
@@ -66,8 +66,15 @@ describe('CF — confirmation steps', () => {
       const { controller, onStateChange } = await step(`process-requires-${kind}`, { [`POST /pay/${kind}/verify`]: `${kind}-verify-success` });
       await controller.submitStep(values);
       await settle();
-      // `success` with a transaction still processing: PENDING, and the watch goes on.
       expect(onStateChange).toHaveBeenCalledWith(expect.objectContaining({ state: 'VERIFYING' }));
+      if (kind === 'otp') {
+        // 2.1: a step the provider settles at once moves the payment — paid, SUCCESS.
+        expect(controller.getSnapshot().state).toBe('SUCCESS');
+        controller.hostGone();
+        api.restore();
+        continue;
+      }
+      // `success` with a transaction still processing (a 2.0 answer): PENDING, and the watch goes on.
       expect(controller.getSnapshot().state).toBe('PENDING');
       api.answer('GET /pay/status', 'status-succeeded');
       await jest.advanceTimersByTimeAsync(5000);
@@ -76,6 +83,15 @@ describe('CF — confirmation steps', () => {
       controller.hostGone();
       api.restore();
     }
+
+    // A `success` still processing: PENDING, never paid on the step's word alone.
+    const processing = body('otp-verify-success');
+    processing.transaction.status = 'processing';
+    const waiting = await step('process-requires-otp', { 'POST /pay/otp/verify': { status: 200, body: processing } });
+    await waiting.controller.submitStep({ code: '123456' });
+    expect(waiting.controller.getSnapshot().state).toBe('PENDING');
+    waiting.controller.hostGone();
+    api.restore();
 
     // A `success` already succeeded: SUCCESS at once.
     const paid = body('otp-verify-success');
@@ -127,7 +143,7 @@ describe('CF — confirmation steps', () => {
       expect(api.callsTo('GET /pay/status').length).toBeGreaterThan(polls);
       await controller.submitStep({ code: '123456' });
       expect(api.callsTo('POST /pay/otp/verify')).toHaveLength(2);
-      expect(controller.getSnapshot().state).toBe('PENDING');
+      expect(controller.getSnapshot().state).toBe('SUCCESS');
       controller.hostGone();
       api.restore();
     }
@@ -139,6 +155,78 @@ describe('CF — confirmation steps', () => {
     await settle();
     expect(paid.controller.getSnapshot().state).toBe('SUCCESS');
     paid.controller.hostGone();
+  });
+
+  it('CF-07 follows a chained step', async () => {
+    // A birthday, then the OTP the provider asks for: its screen, with a fresh attempt count; then paid.
+    const otp = await step('process-requires-birthday', {
+      'POST /pay/birthday/verify': 'birthday-verify-chained-otp',
+      'POST /pay/otp/verify': ['otp-verify-invalid', 'otp-verify-success'],
+    }, { locale: 'en' });
+    expect(otp.controller.getSnapshot().state).toBe('BIRTHDAY_REQUIRED');
+    await otp.controller.submitStep({ birthday: '1990-01-31' });
+    await settle();
+    const chained = body('birthday-verify-chained-otp');
+    expect(otp.controller.getSnapshot()).toMatchObject({
+      state: 'OTP_REQUIRED',
+      busy: false,
+      screen: { name: 'step', step: { kind: 'otp', id: chained.otp_id, hint: chained.otp_masked_contact, error: null } },
+    });
+    expect(otp.onStateChange).not.toHaveBeenCalledWith(expect.objectContaining({ state: 'SUCCESS' }));
+    await otp.controller.submitStep({ code: '000000' });
+    expect(otp.controller.getSnapshot()).toMatchObject({ state: 'OTP_REQUIRED', screen: { step: { error: 'Incorrect code. 2 attempts left.' } } });
+    expect(api.callsTo('POST /pay/otp/verify')[0].body).toEqual({ otp_id: chained.otp_id, code: '000000' });
+    await otp.controller.submitStep({ code: '123456' });
+    expect(otp.controller.getSnapshot().state).toBe('SUCCESS');
+    otp.controller.hostGone();
+    api.restore();
+
+    // A PIN, then the provider's 3-D Secure page: onRedirect and the browser.
+    const onRedirect = jest.fn();
+    const page = await step('process-requires-pin', { 'POST /pay/pin/verify': 'pin-verify-chained-redirect' }, { onRedirect });
+    await page.controller.submitStep({ pin: '1234' });
+    await settle();
+    const url = body('pin-verify-chained-redirect').confirm_url;
+    expect(onRedirect).toHaveBeenCalledWith({ url, method: 'GET' });
+    expect(page.openUrl).toHaveBeenCalledWith(url);
+    expect(page.controller.getSnapshot()).toMatchObject({ state: 'PENDING', screen: { name: 'pending', url } });
+    page.controller.hostGone();
+    api.restore();
+
+    // An action the sheet cannot perform.
+    const unknown = body('birthday-verify-chained-otp');
+    unknown.action = 'confirm_biometrics';
+    const failed = await step('process-requires-birthday', { 'POST /pay/birthday/verify': { status: 200, body: unknown } });
+    await failed.controller.submitStep({ birthday: '1990-01-31' });
+    await settle();
+    expect(failed.controller.getSnapshot().screen).toMatchObject({ name: 'failed', error: { code: 'unsupported_action', retryable: false } });
+    failed.controller.hostGone();
+  });
+
+  it('CF-01 reads codes typed with Arabic-Indic or Persian digits', async () => {
+    // The code, the PIN and the date of birth go out in ASCII digits.
+    const cases: Array<[ConfirmStepKind, Record<string, string>, Record<string, string>]> = [
+      ['otp', { code: '١٢٣٤٥٦' }, { code: '123456' }],
+      ['pin', { pin: '۱۲۳۴' }, { pin: '1234' }],
+      ['birthday', { birthday: '١٩٩٠-٠٤-٢١' }, { birthday: '1990-04-21' }],
+      ['phone', { phone: '٠٨٠١٢٣٤٥٦٧٨' }, { phone: '08012345678' }],
+    ];
+    for (const [kind, values, sent] of cases) {
+      const { controller } = await step(`process-requires-${kind}`, { [`POST /pay/${kind}/verify`]: `${kind}-verify-success` });
+      await controller.submitStep(values);
+      expect([kind, api.callsTo(`POST /pay/${kind}/verify`)[0]?.body]).toEqual([kind, expect.objectContaining(sent)]);
+      controller.hostGone();
+      api.restore();
+    }
+
+    // A code is digits: letters, or other characters, are refused before anything is sent.
+    const { controller } = await step('process-requires-otp', { 'POST /pay/otp/verify': 'otp-verify-success' }, { locale: 'en' });
+    for (const code of ['12ab56', '١٢٣٤٥x']) {
+      await controller.submitStep({ code });
+      expect(controller.getSnapshot()).toMatchObject({ state: 'OTP_REQUIRED', fieldErrors: { code: expect.any(String) } });
+    }
+    expect(api.callsTo('POST /pay/otp/verify')).toHaveLength(0);
+    controller.hostGone();
   });
 
   it('CF-04 shows step validation errors', async () => {
@@ -205,7 +293,8 @@ describe('CF — confirmation steps', () => {
 
     const accepted = await threeDs('3ds-verify-202');
     expect(accepted.getSnapshot()).toMatchObject({ state: '3DS_REQUIRED', screen: { name: 'three_ds', threeDs: { maskedEmail: 'aw*******@example.com' } } });
-    await accepted.submit3ds('123456');
+    // Typed on an Arabic-Indic keyboard: the same code, in ASCII digits.
+    await accepted.submit3ds('١٢٣٤٥٦');
     expect(api.callsTo('POST /pay/3ds/verify')[0].body).toEqual({ three_ds_id: '5f0c2b1e-8d4a-4c3b-9e7f-1a2b3c4d5e6f', code: '123456' });
     expect(accepted.getSnapshot()).toMatchObject({ state: 'VERIFYING', screen: { threeDs: { accepted: true } } });
     api.answer('GET /pay/status', 'status-succeeded');

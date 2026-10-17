@@ -8,6 +8,8 @@ import type { AppStateStatus, NativeEventSubscription } from 'react-native';
 
 import { openHostedRedirect } from '../adapters/hostedRedirect';
 import { monotonicNow } from '../clock';
+import { toAsciiDigits } from '../digits';
+import { formatAmount, sheetStrings } from '../i18n';
 import { newIdempotencyKey, PayClient } from '../client/payClient';
 import { deviceLocales } from '../client/device';
 import { langOf } from '../errorCatalogue';
@@ -17,26 +19,27 @@ import { isMobileMoneyChannel, mobileMoneyRequestData, operatorChoices, operator
 import type { OperatorChoice } from '../mobileMoney/form';
 import { buildHostedCardRequest } from '../mappers/paymentMapper';
 import type {
-  AltchaChallenge,
-  AltchaSolution,
   CheckoutResult,
   CheckoutState,
   ClientSessionOptions,
   ConfirmStepKind,
   HostedCardField,
   PaymentStatus,
+  PayerOtpInstructions,
   PaymentSuccess,
   PresentOptions,
   SdkConfig,
+  SecurityChallenge,
+  SecuritySolution,
   SessionData,
   SessionTransaction,
 } from '../types';
 import { WajubError } from '../WajubError';
 import type { RawProcessBody } from '../wire/parse';
 import { solveAltcha } from './altcha';
-import { availableMethods, SANDBOX_CARD_FIELDS, shownSlugs } from './methods';
+import { availableMethods, limitOf, SANDBOX_CARD_FIELDS, shownSlugs } from './methods';
 import type { MethodEntry } from './methods';
-import { attemptEnded, POLLING, StatusWatcher, SUCCESS_STATUSES } from './watcher';
+import { attemptEnded, decideStatus, POLLING, StatusWatcher, SUCCESS_STATUSES } from './watcher';
 import type { WatchOutcome } from './watcher';
 
 export const UI_TIMINGS = {
@@ -50,6 +53,19 @@ export const UI_TIMINGS = {
 } as const;
 
 /** A confirmation step on screen. */
+/**
+ * The code the payer generates in the operator's menu. `error`: why the last
+ * code was not taken; `attemptsLeft`: the codes the operator may still refuse.
+ * `round` changes each time the screen is shown again (the field starts empty).
+ */
+export interface PayerOtpScreen {
+  name: 'payer_otp';
+  otp: PayerOtpInstructions;
+  error: string | null;
+  attemptsLeft: number | null;
+  round: number;
+}
+
 export interface StepScreen {
   kind: ConfirmStepKind;
   /** The step's id (`otp_id`, …): a processing id. */
@@ -78,7 +94,9 @@ export type Screen =
   | { name: 'load_error'; error: WajubError }
   | { name: 'methods' }
   | { name: 'form'; method: MethodEntry }
-  | { name: 'approval'; phone: string | null; instruction: string | null }
+  /** `codeReceived`: the payer's own code was taken; the operator is processing the payment. */
+  | { name: 'approval'; phone: string | null; instruction: string | null; codeReceived?: boolean }
+  | PayerOtpScreen
   | { name: 'ussd'; instruction: string | null }
   | { name: 'step'; step: StepScreen }
   | { name: 'three_ds'; threeDs: ThreeDsScreen }
@@ -107,6 +125,17 @@ export interface CheckoutSnapshot {
   canCancel: boolean;
   /** The payment is being cancelled. */
   cancelling: boolean;
+  /**
+   * What the payer pays: the selected operator's total, else the selected
+   * channel's, else the payment's; once a payment request was accepted, what
+   * it charged. Null before the payment loads.
+   */
+  amountDue: number | null;
+  /**
+   * The Mobile Money choices (`channel:operator`) that refused too many of the
+   * payer's codes: not offered again for this payment.
+   */
+  exhausted: string[];
 }
 
 export interface MobileMoneySubmission {
@@ -135,9 +164,28 @@ interface Attempt {
   sentAt?: number;
   /** The status's `error_code` known before it was sent (null: none; undefined: not known). */
   baseline?: string | null;
+  /** Its last answer's (or status's) `error_code` once one came: the refusal already known (README §6.7). */
+  answered?: string | null;
 }
 
 const FINAL_SCREENS = ['success', 'failed', 'expired', 'cancelled'];
+
+/** The sandbox test card's fields that are digits: what each must be. */
+const CARD_DIGIT_FIELDS: Record<string, RegExp> = {
+  'card.number': /^[0-9]{12,19}$/,
+  expiry_month: /^[0-9]{1,2}$/,
+  expiry_year: /^[0-9]{2,4}$/,
+  cvv: /^[0-9]{3,4}$/,
+};
+
+/**
+ * A cancel the API refused: 400 (not cancellable any more), or 409 — an
+ * attempt under way (`payment_in_progress`) or a payment partly paid
+ * (`payment_partly_paid`). The status then says what the payment is.
+ */
+function refusedCancel(e: unknown): boolean {
+  return e instanceof WajubError && (e.http_status === 400 || e.http_status === 409);
+}
 
 /** A payment that had ended when the session was read: its load error (README §4.2). */
 const TERMINAL_AT_LOAD: Record<string, string> = {
@@ -209,7 +257,7 @@ export class CheckoutController {
   /** Altcha is on for this payment: no request goes without a solution. */
   private altchaOn = false;
   /** The next solution, being fetched or solved; null until one is asked for. */
-  private altcha: Promise<AltchaSolution | WajubError | null> | null = null;
+  private altcha: Promise<SecuritySolution | WajubError | null> | null = null;
   /** `altcha` was started ahead of time, after the last solution went out. */
   private altchaAhead = false;
   /** The solves under way, stopped when the sheet settles. */
@@ -227,6 +275,15 @@ export class CheckoutController {
   private knownStatus: string | null = null;
   /** A 400 whose status re-read said nothing: a later `pending` read decides as the re-read would have. */
   private notProcessable: Attempt | null = null;
+  /** The session said it is a sandbox one: test numbers and cards. */
+  private sandboxSession = false;
+  /** The Mobile Money form's channel and operator, as selected, picked or detected: what the amount follows. */
+  private selection: { channel: string; operator: string | null } | null = null;
+  /** The last Mobile Money request: sent again, with the payer's code, from the code screen. */
+  private mobileMoneyRequest: { channel: string; operator: string; data: Record<string, unknown>; phone: string } | null = null;
+  /** The code screen's instructions, kept for a refusal read while watching. */
+  private payerOtp: PayerOtpInstructions | null = null;
+  private payerOtpRound = 0;
   private graceTimer: ReturnType<typeof setTimeout> | null = null;
   /** A payment request that got no answer: its key, reused by the next Pay if it never reached the API. */
   private unanswered: { key: string; sentAt: number; baseline: string | null | undefined } | null = null;
@@ -262,6 +319,8 @@ export class CheckoutController {
       fieldErrors: {},
       canCancel: false,
       cancelling: false,
+      amountDue: null,
+      exhausted: [],
     };
   }
 
@@ -283,6 +342,7 @@ export class CheckoutController {
     const next = { ...this.snapshot, ...patch };
     // While its cancel runs, the button stays, disabled and spinning.
     next.canCancel = (next.cancelling || !next.busy) && (next.screen.name === 'methods' || next.screen.name === 'form') && this.mayCancel();
+    next.amountDue = this.amountDue(next);
     this.snapshot = next;
     this.listeners.forEach((l) => l());
   }
@@ -342,6 +402,11 @@ export class CheckoutController {
         // Its status decides what closing the sheet means from now on, before sdk-config is in.
         this.knownStatus = session.transaction.status.toLowerCase();
         this.transaction = session.transaction;
+        // A sandbox payment stays one: a later answer without the key never makes it live.
+        this.sandboxSession = session.transaction.sandbox === true;
+        // The refusal left on the payment (null: none) is the watch's baseline: not this sheet's news.
+        // An older answer does not say: unknown.
+        if (session.transaction.error_code !== undefined) this.knownErrorCode = session.transaction.error_code;
         let config: SdkConfig | null | undefined;
         if (!payableAtLoad(session)) {
           // Paid, ended or under way: the session alone draws its screen (success, notice, restore
@@ -487,6 +552,37 @@ export class CheckoutController {
     this.update({ methods, screen });
   }
 
+  /** README §5.3: the selected operator's total, else the chosen channel's, else the payment's. */
+  private amountDue(next: CheckoutSnapshot): number | null {
+    const t = this.transaction;
+    if (!t) return null;
+    // A request accepted (approval, steps, the outcome): what it charged.
+    if (next.screen.name !== 'methods' && next.screen.name !== 'form' && next.screen.name !== 'payer_otp') return t.amount_total ?? t.amount;
+    // Choosing again: the selection's, not what an attempt that ended would have charged.
+    const base = next.session?.transaction ?? t;
+    const total = base.amount_total ?? base.amount;
+    const channels = next.session?.channels ?? [];
+    const chosen = this.chosen;
+    if (!chosen) return total;
+    if (chosen.kind === 'mobile_money') {
+      const channel = this.selection ? channels.find((c) => c.slug === this.selection!.channel) : undefined;
+      const operator = channel?.operators?.find((o) => o.operator === this.selection?.operator);
+      return operator?.amount_total ?? channel?.amount_total ?? total;
+    }
+    return channels.find((c) => c.slug === chosen.slug)?.amount_total ?? total;
+  }
+
+  /**
+   * The Mobile Money form's selection: the channel and the operator selected,
+   * picked or read from the number. The amount the sheet shows follows it.
+   */
+  selectMobileMoney(channel: string | null, operator: string | null): void {
+    const next = channel ? { channel, operator } : null;
+    if (next?.channel === this.selection?.channel && next?.operator === this.selection?.operator) return;
+    this.selection = next;
+    this.update({});
+  }
+
   /**
    * README §14: `/pay/cancel` goes only for a loaded session whose last known
    * status is `pending`, with no attempt undecided — sent (or Stripe's Pay
@@ -497,6 +593,11 @@ export class CheckoutController {
    */
   private mayCancel(): boolean {
     return this.knownStatus === 'pending' && !this.inFlight && !this.stripePressed && !this.pressed;
+  }
+
+  /** A later answer's transaction over the one known; the session's sandbox flag is kept. */
+  private absorb(update: SessionTransaction): void {
+    this.transaction = { ...this.transaction, ...update, sandbox: this.sandboxSession };
   }
 
   /** The payer left (closed, cancelling) while the SDK was waiting: nothing more is sent. */
@@ -523,6 +624,8 @@ export class CheckoutController {
       started: true,
       phone: null,
       data: {},
+      // The refusal left on the payment at load is not news.
+      baseline: t.error_code,
     };
     if (ctx.is_ussd) {
       this.show({ name: 'ussd', instruction: ctx.payer_instruction ?? null }, 'USSD_REQUIRED');
@@ -539,13 +642,13 @@ export class CheckoutController {
 
   /** The session's challenge, solved in the background as soon as it loads. */
   private startAltcha(session: SessionData): void {
-    if (!session.altcha || this.altcha) return;
+    if (!session.securityChallenge || this.altcha) return;
     this.altchaOn = true;
     this.altchaAhead = false;
-    this.altcha = this.solve(session.altcha);
+    this.altcha = this.solve(session.securityChallenge);
   }
 
-  private solve(challenge: AltchaChallenge): Promise<AltchaSolution | WajubError> {
+  private solve(challenge: SecurityChallenge): Promise<SecuritySolution | WajubError> {
     const signal = { aborted: this.settled };
     this.altchaSolves.add(signal);
     return solveAltcha(challenge, signal).then((solution) => {
@@ -555,15 +658,15 @@ export class CheckoutController {
   }
 
   /** A new challenge from GET /pay/session (with its retries), solved; null when Altcha was turned off. */
-  private fetchAltcha(): Promise<AltchaSolution | WajubError | null> {
+  private fetchAltcha(): Promise<SecuritySolution | WajubError | null> {
     return this.client.getSession(this.token).then(
       (session) => {
         if (this.settled) return null;
-        if (!session.altcha) {
+        if (!session.securityChallenge) {
           this.altchaOn = false;
           return null;
         }
-        return this.solve(session.altcha);
+        return this.solve(session.securityChallenge);
       },
       (error: unknown) => (error instanceof WajubError ? error.localized(this.lang) : WajubError.create('network_error', { lang: this.lang })),
     );
@@ -574,7 +677,7 @@ export class CheckoutController {
    * fetched ahead of time that failed is asked for again now; one that cannot
    * be had is an error the payer can retry — nothing is sent without it.
    */
-  private async nextAltcha(): Promise<AltchaSolution | WajubError | null> {
+  private async nextAltcha(): Promise<SecuritySolution | WajubError | null> {
     if (!this.altchaOn) return null;
     if (!this.altcha) {
       this.altcha = this.fetchAltcha();
@@ -595,7 +698,7 @@ export class CheckoutController {
    * The solution for the request a Pay press is about to send: from the press
    * on, the attempt is undecided (README §14) — nothing is cancelled meanwhile.
    */
-  private async solutionForPay(): Promise<AltchaSolution | WajubError | null> {
+  private async solutionForPay(): Promise<SecuritySolution | WajubError | null> {
     this.pressed = true;
     try {
       return await this.nextAltcha();
@@ -605,8 +708,10 @@ export class CheckoutController {
   }
 
   /** A solution goes with one request only: the next one is fetched and solved ahead. */
-  private useAltcha(data: Record<string, unknown>, solution: AltchaSolution): void {
-    data.altcha = solution;
+  private useAltcha(data: Record<string, unknown>, solution: SecuritySolution, endpoint: Attempt['endpoint'] = 'process'): void {
+    // A payment's `data` carries it on the wire; a client session's options name it.
+    if (endpoint === 'client_session') data.securitySolution = solution;
+    else data.altcha = solution;
     this.altcha = this.fetchAltcha();
     this.altchaAhead = true;
   }
@@ -639,10 +744,10 @@ export class CheckoutController {
     const method = this.snapshot.methods.find((m) => m.kind === 'mobile_money');
     // Nothing is taken while the payment is being cancelled, or once the sheet closed.
     if (!method || method.kind !== 'mobile_money' || this.abandoned()) return;
-    const problem = validateMobileMoney(input.phone, input.country, this.choicesFor(input.country, method), input.choice?.id ?? null);
-    // Sandbox test numbers do not follow real numbering plans: a mismatch never blocks there.
-    const blocking = problem && !(problem.code === 'operator_mismatch' && this.transaction?.sandbox);
-    if (problem && blocking) {
+    const sandbox = this.sandboxSession;
+    const problem = validateMobileMoney(input.phone, input.country, this.choicesFor(input.country, method), input.choice?.id ?? null, sandbox);
+    // In a sandbox session a test number names its own operator, and a mismatch stops as in live.
+    if (problem) {
       const message =
         problem.code === 'operator_mismatch'
           ? WajubError.create('operator_mismatch', { lang: this.lang, vars: { detected: problem.detectedLabel, selected: problem.selectedLabel } }).message
@@ -652,9 +757,39 @@ export class CheckoutController {
     }
     const choice = input.choice;
     if (!choice) return;
-    const detected = detectOperator(input.phone, input.country);
-    const data = mobileMoneyRequestData(input.phone, input.country, operatorHint(choice, input.pickedByHand, detected));
+    const unavailable = this.unavailable(choice);
+    if (unavailable) {
+      this.update({ fieldErrors: { operator: unavailable } });
+      return;
+    }
+    const detected = detectOperator(input.phone, input.country, sandbox);
+    const data = mobileMoneyRequestData(input.phone, input.country, operatorHint(choice, input.pickedByHand, detected), sandbox);
+    this.mobileMoneyRequest = { channel: choice.channel, operator: choice.id, data, phone: data.phone };
+    // A channel that announces the payer's own code: its screen first, no request yet (README §6.7).
+    const announced = this.snapshot.session?.channels.find((c) => c.slug === choice.channel && !c.operators?.length)?.payer_otp;
+    if (announced) {
+      if (this.inFlight || this.snapshot.busy) return;
+      this.update({ fieldErrors: {}, banner: null });
+      return this.showPayerOtp(announced, null, null);
+    }
     await this.runAttempt(choice.channel, 'mobile_money', data, data.phone);
+  }
+
+  /**
+   * Why a Mobile Money choice cannot be paid with, in the sheet's language:
+   * its channel refused too many of the payer's codes, or what the payer would
+   * pay there is outside the channel's limits. Null when it can.
+   */
+  unavailable(choice: { channel: string; id: string }): string | null {
+    if (this.snapshot.exhausted.includes(`${choice.channel}:${choice.id}`)) return WajubError.create('otp_attempts_exceeded', { lang: this.lang }).message;
+    const session = this.snapshot.session;
+    const channel = session?.channels.find((c) => c.slug === choice.channel);
+    if (!session || !channel) return null;
+    const limit = limitOf(channel, session.transaction.amount_total ?? session.transaction.amount, choice.id);
+    if (!limit) return null;
+    const words = sheetStrings(this.lang);
+    const currency = session.transaction.currency;
+    return limit.min !== undefined ? words.minimum(formatAmount(limit.min, currency, this.lang)) : words.maximum(formatAmount(limit.max ?? 0, currency, this.lang));
   }
 
   private choicesFor(country: string, method: Extract<MethodEntry, { kind: 'mobile_money' }>): OperatorChoice[] {
@@ -662,9 +797,11 @@ export class CheckoutController {
   }
 
   /** Card through a hosted page, the sandbox test form, or a client session — by the method's flavour. */
-  async payCard(fields: Record<string, string>): Promise<void> {
+  async payCard(typed: Record<string, string>): Promise<void> {
     const method = this.chosenCard();
     if (!method || this.abandoned()) return;
+    // Digits typed on an Arabic-Indic or Persian keyboard are read as the ASCII ones they mean.
+    const fields = Object.fromEntries(Object.entries(typed).map(([key, value]) => [key, toAsciiDigits(value ?? '')]));
     const missing = this.checkFields(method.flavor === 'sandbox_form' ? [...SANDBOX_CARD_FIELDS] : method.fields, fields);
     if (missing) return;
     if (method.flavor === 'client_session') {
@@ -727,6 +864,9 @@ export class CheckoutController {
         errors[field] = WajubError.create('invalid_email', { lang: this.lang }).message;
       } else if (field === 'country' && !/^[A-Za-z]{2}$/.test(value)) {
         errors[field] = WajubError.create('validation_error', { lang: this.lang }).message;
+      } else if (CARD_DIGIT_FIELDS[field] && !CARD_DIGIT_FIELDS[field].test(value.replace(/\s/g, ''))) {
+        // The test card's number, expiry and code: ASCII digits only.
+        errors[field] = WajubError.create('validation_error', { lang: this.lang }).message;
       }
     }
     this.update({ fieldErrors: errors });
@@ -740,7 +880,7 @@ export class CheckoutController {
     const payload: Record<string, unknown> = { ...data };
     if (this.options.returnUrl) payload.return_url = this.options.returnUrl;
     // The API refuses raw card data in live; the SDK never sends it there.
-    if (!this.transaction?.sandbox && RAW_CARD_KEYS.some((k) => k in payload)) {
+    if (!this.sandboxSession && RAW_CARD_KEYS.some((k) => k in payload)) {
       this.update({ banner: WajubError.create('raw_card_data_not_accepted', { lang: this.lang }) });
       return;
     }
@@ -794,15 +934,44 @@ export class CheckoutController {
 
   /** A 2xx: HTTP status, `action` and `transaction.status` decide — never `message`. */
   private handleAnswer(body: RawProcessBody): void {
+    if (body.action === 'payer_otp') {
+      // Nothing was charged: no onPaymentStarted, the payment is still pending and payable.
+      this.inFlight = false;
+      this.knownStatus = 'pending';
+      if (body.transaction) {
+        this.absorb(body.transaction);
+        // A refused code's `invalid_otp` is the new baseline: a later status still carrying it is not news.
+        if (body.transaction.error_code !== undefined) this.knownErrorCode = body.transaction.error_code;
+      }
+      if (this.attempt) this.attempt.answered = body.transaction?.error_code ?? null;
+      // Without its instructions there is nothing to show: unsupported, though nothing was charged.
+      if (!body.payer_otp) return this.fail(WajubError.create('unsupported_action', { lang: this.lang, apiMessage: body.action }));
+      const request = body.payer_otp;
+      const words = sheetStrings(this.lang).payerOtp;
+      const error =
+        request.reason === 'invalid'
+          ? request.otp_length
+            ? words.exactLength(request.otp_length)
+            : words.lengthRange(4, 8)
+          : request.reason === 'refused'
+            ? words.refused
+            : null;
+      return this.showPayerOtp(request, error, request.reason === 'refused' ? request.attempts_remaining : null);
+    }
     this.markStarted(body.transaction?.status);
+    if (this.attempt && body.transaction) this.attempt.answered = body.transaction.error_code ?? null;
     if (!body.transaction) {
-      // Accepted, but without the payment: an unknown outcome — watched, never a failure.
+      // Accepted, but without the payment: an unknown outcome — watched, never a failure, and read
+      // as a request without an answer: a newer refusal ends it, a `pending` a minute on sends the
+      // payer back to the form, the next Pay under the same key.
+      const attempt = this.attempt;
+      if (attempt) this.unanswered = { key: attempt.key, sentAt: attempt.sentAt ?? monotonicNow(), baseline: attempt.baseline };
       this.update({ busy: false });
       this.show({ name: 'pending', url: null, capped: false }, 'PENDING');
       this.watch(false);
       return;
     }
-    if (body.transaction) this.transaction = { ...this.transaction, ...body.transaction };
+    if (body.transaction) this.absorb(body.transaction);
     const status = body.transaction?.status ?? '';
     const ctx = body.transaction?.processing_context ?? {};
     this.update({ busy: false });
@@ -817,7 +986,16 @@ export class CheckoutController {
           this.watch(true);
         } else if (this.attempt?.method === 'mobile_money' || ctx.is_mobile_money) {
           // A push went to the phone: Pay is not offered again while it is processing.
-          this.show({ name: 'approval', phone: this.attempt?.phone ?? null, instruction: ctx.payer_instruction ?? null }, 'APPROVAL_REQUIRED');
+          this.show(
+            {
+              name: 'approval',
+              phone: this.attempt?.phone ?? null,
+              instruction: ctx.payer_instruction ?? null,
+              // The payer's own code went with this request: "Code received" instead of the approval title.
+              ...(this.attempt?.data.otp !== undefined ? { codeReceived: true } : {}),
+            },
+            'APPROVAL_REQUIRED',
+          );
           this.watch(true);
         } else {
           this.show({ name: 'pending', url: null, capped: false }, 'PENDING');
@@ -903,15 +1081,19 @@ export class CheckoutController {
       this.knownErrorCode = error.decline_code;
       this.knownStatus = 'pending';
     }
+    // The operator refused too many of the payer's codes: payable on another method, not this one.
+    if (status === 402 && error.code === 'otp_attempts_exceeded') return this.exhaust(error.localized(this.lang), true);
     this.fail(error.localized(this.lang));
   }
 
   /** 422: the form again, with its errors (README §9.1), or the Altcha retry (§15). */
   private async handleValidation(error: WajubError): Promise<void> {
-    // The API refuses a solution (or its absence) without an error_code: a malformed one under
-    // `data.altcha` (or `altcha`), a wrong or missing one only by its message — matched as a last resort.
+    // The API refuses a solution (or its absence) with `error_code: security_check_failed`. An older
+    // answer had no code: a malformed solution under `data.altcha` (or `altcha`), a wrong or missing
+    // one only by its message — matched as a last resort, and only then.
     const altchaField = Object.keys(error.details ?? {}).some((k) => k === 'altcha' || k === 'data.altcha');
-    if (altchaField || /security challenge/i.test(error.api_message ?? '')) {
+    const uncoded = error.code === 'validation_error' && (altchaField || /security challenge/i.test(error.api_message ?? ''));
+    if (error.code === 'security_check_failed' || uncoded) {
       if (this.altchaRetried) {
         this.fail(WajubError.create('security_check_failed', { lang: this.lang }));
         return;
@@ -955,7 +1137,7 @@ export class CheckoutController {
       const choices = this.choicesFor(country, method);
       const named = /belongs to \w+ \(\w+\.(\w+)\)/i.exec(apiMessage)?.[1]?.toLowerCase();
       // The API's carrier lookup first; the prefix rules when its message names none.
-      const detectedId = named || (attempt?.phone ? detectOperator(attempt.phone, country) : null);
+      const detectedId = named || (attempt?.phone ? detectOperator(attempt.phone, country, this.sandboxSession) : null);
       const detected = choices.find((c) => c.id === detectedId);
       const selected = choices.find((c) => c.channel === attempt?.channel && (!c.viaAggregate || c.id === attempt?.data.operator));
       if (detected && selected) {
@@ -981,7 +1163,7 @@ export class CheckoutController {
     }
     // A new request after a definitive answer: a new key.
     const data = { ...attempt.data };
-    this.useAltcha(data, solution);
+    this.useAltcha(data, solution, attempt.endpoint);
     this.attempt = { ...attempt, key: newIdempotencyKey(), data };
     this.inFlight = true;
     await this.send(this.attempt);
@@ -1058,7 +1240,7 @@ export class CheckoutController {
       return_url: this.options.returnUrl ?? null,
     };
     if (this.restartClientSession) data.restart = true;
-    if (altcha) this.useAltcha(data, altcha);
+    if (altcha) this.useAltcha(data, altcha, 'client_session');
     this.attempt = { endpoint: 'client_session', channel, method: 'card', key: newIdempotencyKey(), startedAt: monotonicNow(), started: false, phone: null, data };
     this.inFlight = true;
     await this.send(this.attempt);
@@ -1076,7 +1258,7 @@ export class CheckoutController {
         this.fail(WajubError.create('unsupported_action', { lang: this.lang, apiMessage: body.action ?? null }));
         return;
       }
-      if (body.transaction) this.transaction = { ...this.transaction, ...body.transaction };
+      if (body.transaction) this.absorb(body.transaction);
       this.markStarted(body.transaction?.status);
       this.clientSessionId = session.id;
       this.update({ busy: false });
@@ -1089,7 +1271,7 @@ export class CheckoutController {
       const status = error.http_status;
       if (status === 410) return this.end('expired', error.localized(this.lang));
       if (status === 401 || status === 403 || status === 404 || status === 429) return this.fail(error.localized(this.lang));
-      if (status === 422 && error.code === 'validation_error' && error.details) return this.handleValidation(error);
+      if (status === 422 && (error.code === 'security_check_failed' || (error.code === 'validation_error' && error.details))) return this.handleValidation(error);
       // Nothing was charged: say why on the form, the payer can pick another way.
       const banner = error.localized(this.lang);
       this.show(this.chosen ? { name: 'form', method: this.chosen } : this.snapshot.screen, 'COLLECTING_DETAILS', { banner });
@@ -1106,7 +1288,7 @@ export class CheckoutController {
     try {
       const body = await this.client.completeClientSession(this.token, id);
       if (this.settled || attempt !== this.attempt) return;
-      if (body.transaction) this.transaction = { ...this.transaction, ...body.transaction };
+      if (body.transaction) this.absorb(body.transaction);
       this.markStarted(body.transaction?.status);
       if (SUCCESS_STATUSES.includes(body.transaction?.status ?? '')) return this.succeed(this.transaction!, 'card');
       // 202: not paid yet — the PSP's webhook settles it; the watch goes on. A refusal a poll
@@ -1173,7 +1355,9 @@ export class CheckoutController {
 
   /** The step's body: its id under `{kind}_id`, then its fields. */
   private stepBody(step: StepScreen, values: Record<string, string>): Record<string, string> | null {
-    const v = (k: string) => (values[k] ?? '').trim();
+    // Digits typed on an Arabic-Indic or Persian keyboard are read as the ASCII ones they mean;
+    // a code, a PIN and a date are then ASCII digits or refused.
+    const v = (k: string) => toAsciiDigits(values[k] ?? '').trim();
     const errors: Record<string, string> = {};
     const required = WajubError.create('field_required', { lang: this.lang }).message;
     const body: Record<string, string> = { [`${step.kind}_id`]: step.id };
@@ -1228,7 +1412,12 @@ export class CheckoutController {
       const answer = await this.client.verifyStep(this.token, step.kind, body);
       if (!this.onStep(step.id)) return;
       if (answer.status === 'success') {
-        if (answer.transaction) this.transaction = { ...this.transaction, ...answer.transaction };
+        if (answer.action) {
+          // The provider asks for another step, or its page: followed as a payment's own answer.
+          const { status: _status, transaction, ...next } = answer;
+          return this.handleAnswer({ code: 202, status: 'Accepted', message: '', ...next, ...(transaction ? { transaction } : {}) });
+        }
+        if (answer.transaction) this.absorb(answer.transaction);
         this.markStarted(answer.transaction?.status);
         const s = answer.transaction?.status ?? '';
         if (SUCCESS_STATUSES.includes(s)) return this.succeed(this.transaction!, this.attempt?.method ?? 'card');
@@ -1301,7 +1490,7 @@ export class CheckoutController {
   async submit3ds(code: string): Promise<void> {
     const screen = this.snapshot.screen;
     if (screen.name !== 'three_ds' || this.snapshot.busy || this.abandoned()) return;
-    const value = code.trim();
+    const value = toAsciiDigits(code).trim();
     if (!/^[A-Za-z0-9]{4,8}$/.test(value)) {
       this.update({ fieldErrors: { code: WajubError.create(value ? 'invalid_code' : 'field_required', { lang: this.lang }).message } });
       return;
@@ -1356,13 +1545,15 @@ export class CheckoutController {
       token: this.token,
       transactionId: this.transaction?.id ?? '',
       echo: this.snapshot.session?.echo,
-      realtime: this.options.realtime,
       lang: this.lang,
       seenProcessing,
       deadline: attemptStart + POLLING.overallCapMs,
       onOutcome: (outcome) => this.onWatchOutcome(outcome),
+      // A payer-code refusal already known is the earlier attempt's, not this one's end.
+      decide: (status, seen) => (this.knownRefusal(status) ? null : decideStatus(status, seen, this.lang)),
       onStatus: (status) => {
         this.knownStatus = status.status;
+        if (this.checkPayerOtpRefusal(status)) return;
         this.checkUnanswered(status);
         this.checkNotProcessable(status);
         this.knownErrorCode = status.error_code ?? null;
@@ -1374,6 +1565,119 @@ export class CheckoutController {
   private stopWatching(): void {
     this.watcher?.stop();
     this.watcher = null;
+  }
+
+  /** The code screen, again or for the first time: the field starts empty. */
+  private showPayerOtp(otp: PayerOtpInstructions, error: string | null, attemptsLeft: number | null): void {
+    this.payerOtp = otp;
+    this.payerOtpRound += 1;
+    this.show({ name: 'payer_otp', otp, error, attemptsLeft, round: this.payerOtpRound }, 'PAYER_OTP_REQUIRED', { busy: false });
+  }
+
+  /** "Confirm payment": the same request as the Pay that led here, with the code, under a new key. */
+  async submitPayerOtp(code: string): Promise<void> {
+    const screen = this.snapshot.screen;
+    const request = this.mobileMoneyRequest;
+    if (screen.name !== 'payer_otp' || !request || this.snapshot.busy || this.abandoned()) return;
+    const value = toAsciiDigits(code).trim();
+    const length = screen.otp.otp_length;
+    if (!(length ? new RegExp(`^[0-9]{${length}}$`) : /^[0-9]{4,8}$/).test(value)) {
+      const words = sheetStrings(this.lang).payerOtp;
+      this.update({ fieldErrors: { code: length ? words.exactLength(length) : words.lengthRange(4, 8) } });
+      return;
+    }
+    // A new press of Pay: a key of its own.
+    this.reuseKey = null;
+    await this.runAttempt(request.channel, 'mobile_money', { ...request.data, otp: value }, request.phone);
+  }
+
+  /** "Use another payment method": the Mobile Money form again. */
+  leavePayerOtp(): void {
+    if (this.snapshot.screen.name !== 'payer_otp' || this.snapshot.busy || this.abandoned()) return;
+    this.backToMobileMoneyForm(null);
+  }
+
+  /** The Mobile Money form again; `notify`: the banner is an error the host hears of (`onError`). */
+  private backToMobileMoneyForm(banner: WajubError | null, notify = banner !== null, patch: Partial<CheckoutSnapshot> = {}): void {
+    this.stopWatching();
+    this.payerOtp = null;
+    this.inFlight = false;
+    this.knownStatus = 'pending';
+    this.attempt = null;
+    // The payment's Mobile Money form, as on a first opening: also on a sheet reopened on an approval.
+    const method = this.snapshot.methods.find((m) => m.kind === 'mobile_money') ?? this.chosen;
+    if (method) this.chosen = method;
+    this.show(method ? { name: 'form', method } : { name: 'methods' }, method ? 'COLLECTING_DETAILS' : 'INITIATED', { busy: false, banner, fieldErrors: {}, ...patch });
+    if (banner && notify) this.emit('onError', banner);
+  }
+
+  /** Too many codes refused on the channel last paid with: not offered again for this payment. */
+  private exhaust(error: WajubError, notify: boolean): void {
+    const request = this.mobileMoneyRequest;
+    // A sheet reopened on the approval sent no request: the payment's channel says which one.
+    const key = request ? `${request.channel}:${request.operator}` : this.choiceKeyOf(this.attempt?.channel);
+    const exhausted = key && !this.snapshot.exhausted.includes(key) ? [...this.snapshot.exhausted, key] : this.snapshot.exhausted;
+    this.backToMobileMoneyForm(error, notify, { exhausted });
+  }
+
+  /** The Mobile Money choice (`channel:operator`) a real channel slug is paid through: its own, or an aggregate's member. */
+  private choiceKeyOf(slug: string | undefined): string | null {
+    if (!slug) return null;
+    for (const channel of this.snapshot.session?.channels ?? []) {
+      if (channel.slug === slug && !channel.operators?.length) {
+        const parts = slug.toLowerCase().split('.');
+        return `${slug}:${parts.length >= 2 ? parts[1] : parts[0]}`;
+      }
+      const member = channel.operators?.find((o) => o.slug === slug);
+      if (member) return `${channel.slug}:${member.operator}`;
+    }
+    return null;
+  }
+
+  /** The refusal the last answer (else the request) already knew: not news (README §6.7). */
+  private refusalBaseline(): string | null | undefined {
+    const attempt = this.attempt;
+    if (!attempt) return this.knownErrorCode;
+    return attempt.answered !== undefined ? attempt.answered : attempt.baseline;
+  }
+
+  /** A `pending` still carrying a payer-code refusal already known. */
+  private knownRefusal(status: PaymentStatus): boolean {
+    const code = status.error_code ?? null;
+    return status.status === 'pending' && (code === 'invalid_otp' || code === 'otp_attempts_exceeded') && code === this.refusalBaseline();
+  }
+
+  /**
+   * A payer-code refusal newer than the last answer (README §6.7). With
+   * `invalid_otp`: after a code from this sheet, the code screen again with
+   * the refused text (the count is not known here); with no code sent from
+   * this sheet, the Mobile Money form with that text, no `onError`. With
+   * `otp_attempts_exceeded`, the form, the channel not offered again.
+   */
+  private checkPayerOtpRefusal(status: PaymentStatus): boolean {
+    const attempt = this.attempt;
+    // Under way again: a refusal before this is no longer the one known.
+    if (attempt && (status.status === 'processing' || status.status === 'partial')) attempt.answered = status.error_code ?? null;
+    const code = status.error_code ?? null;
+    if (status.status !== 'pending' || (code !== 'invalid_otp' && code !== 'otp_attempts_exceeded') || this.knownRefusal(status)) return false;
+    this.knownErrorCode = code;
+    const words = sheetStrings(this.lang).payerOtp;
+    if (code === 'otp_attempts_exceeded') {
+      this.exhaust(WajubError.create('otp_attempts_exceeded', { lang: this.lang }), true);
+      return true;
+    }
+    if (attempt?.data.otp !== undefined && this.payerOtp) {
+      this.stopWatching();
+      this.inFlight = false;
+      this.knownStatus = 'pending';
+      this.attempt = null;
+      this.showPayerOtp(this.payerOtp, words.refused, null);
+      return true;
+    }
+    // A code sent elsewhere was refused: the form, with the refusal as a note, not a failure.
+    const refused = WajubError.create('invalid_otp', { lang: this.lang });
+    this.backToMobileMoneyForm(new WajubError({ ...refused.toJSON(), message: words.refused, details: refused.details, retryable: true }), false);
+    return true;
   }
 
   /**
@@ -1493,7 +1797,7 @@ export class CheckoutController {
   private notSent(error: WajubError): void {
     if (this.settled || this.finished()) return;
     this.inFlight = false;
-    this.show(this.snapshot.screen, 'COLLECTING_DETAILS', { busy: false, banner: error });
+    this.show(this.snapshot.screen, this.snapshot.screen.name === 'payer_otp' ? 'PAYER_OTP_REQUIRED' : 'COLLECTING_DETAILS', { busy: false, banner: error });
     this.emit('onError', error);
   }
 
@@ -1531,7 +1835,7 @@ export class CheckoutController {
       const { redirect_url } = await this.client.cancel(this.token);
       this.settle(this.cancelled('payer_cancelled', redirect_url));
     } catch (e) {
-      if (e instanceof WajubError && e.http_status === 400) {
+      if (refusedCancel(e)) {
         await this.resolveRefusedCancel('payer_cancelled');
         return;
       }
@@ -1540,7 +1844,7 @@ export class CheckoutController {
     }
   }
 
-  /** A cancel answered 400: the payment already ended, or is under way. The status decides. */
+  /** A cancel refused (400, 409): the payment already ended, is under way or partly paid. The status decides. */
   private async resolveRefusedCancel(reason: 'payer_cancelled' | 'dismissed'): Promise<void> {
     let status = '';
     try {
@@ -1643,7 +1947,7 @@ export class CheckoutController {
     this.client.cancel(this.token).then(
       ({ redirect_url }) => this.settle(this.cancelled('dismissed', redirect_url)),
       (e: unknown) => {
-        if (e instanceof WajubError && e.http_status === 400) void this.resolveRefusedCancel('dismissed');
+        if (refusedCancel(e)) void this.resolveRefusedCancel('dismissed');
         else this.settle(this.cancelled('dismissed', null));
       },
     );

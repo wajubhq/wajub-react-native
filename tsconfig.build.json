@@ -1,4 +1,9 @@
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "removeComments": true,
+    "jsx": "react-jsx"
+  },
   "exclude": ["**/*.test.ts", "**/*.test.tsx", "src/test/**", "src/__tests__/**"]
 }
